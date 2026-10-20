@@ -1,0 +1,140 @@
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Every 15 minutes during the A-share session (China 09:00-15:59).
+    - cron: "*/15 1-7 * * 1-5"
+    # Hourly full refresh (China 09:05-14:05) plus the post-close snapshot.
+    - cron: "5 1-6 * * 1-5"
+    - cron: "10 7 * * 1-5"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: static-dashboard-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      FULL_REFRESH: ${{ github.event_name != 'schedule' || github.event.schedule == '5 1-6 * * 1-5' || github.event.schedule == '10 7 * * 1-5' }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install runtime dependencies
+        run: pip install -r requirements-ci.txt
+
+      - name: Restore previous encrypted snapshot
+        uses: actions/cache/restore@v4
+        with:
+          path: previous/static-api
+          key: static-api-full-${{ hashFiles('build/crypto-meta.json') }}-${{ github.run_id }}
+          restore-keys: |
+            static-api-full-${{ hashFiles('build/crypto-meta.json') }}-
+
+      - name: Decrypt runtime data bundle
+        env:
+          SOURCE_DATA_KEY: ${{ secrets.SOURCE_DATA_KEY }}
+        run: |
+          set -euo pipefail
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -in bundle/source-data.tar.gz.enc \
+            -out /tmp/source-data.tar.gz \
+            -pass env:SOURCE_DATA_KEY
+          tar -xzf /tmp/source-data.tar.gz -C .
+          rm -f /tmp/source-data.tar.gz
+          test -f config/portfolio.json
+          test -f data/dashboard-quote-cache.json
+
+      - name: Start dashboard server
+        run: |
+          set -euo pipefail
+          nohup python scripts/dashboard_server.py \
+            --port 8765 --no-news-warmup --no-background-refresh \
+            > /tmp/dashboard-server.log 2>&1 &
+          echo $! > /tmp/dashboard-server.pid
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:8765/api/health > /tmp/health.json; then
+              echo "server ready after ${i} tries"
+              head -c 600 /tmp/health.json
+              echo
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "server failed to start" >&2
+          tail -200 /tmp/dashboard-server.log >&2
+          exit 1
+
+      - name: Export read-only API snapshots
+        run: |
+          set -euo pipefail
+          if [ "${FULL_REFRESH}" = "true" ]; then
+            python build/export_static.py --out export
+          else
+            python build/export_static.py --out export --fast
+          fi
+          ls -lh export/static-api | tail -5
+
+      - name: Build encrypted static site
+        env:
+          SITE_PASSWORD: ${{ secrets.SITE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ "${FULL_REFRESH}" = "true" ]; then
+            python build/build_site.py --password "$SITE_PASSWORD" --previous previous --full
+          else
+            python build/build_site.py --password "$SITE_PASSWORD" --previous previous
+          fi
+
+      - name: Save encrypted snapshot for fast runs
+        if: env.FULL_REFRESH == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p previous
+          rm -rf previous/static-api
+          cp -a site/static-api previous/static-api
+
+      - name: Save previous encrypted snapshot cache
+        if: env.FULL_REFRESH == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: previous/static-api
+          key: static-api-full-${{ hashFiles('build/crypto-meta.json') }}-${{ github.run_id }}
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Server log tail on failure
+        if: failure()
+        run: tail -200 /tmp/dashboard-server.log || true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
