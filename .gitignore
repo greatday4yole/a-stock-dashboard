@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Personal runtime data is injected from the encrypted bundle at build time.
+config/
+data/
+dashboard/personal-index/
+dashboard/notes/
+
+# Build outputs and local secrets.
+export/
+site/
+previous/
+.deploy-secrets.json
