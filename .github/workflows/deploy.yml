@@ -5,8 +5,8 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    # Every 15 minutes during the A-share session (China 09:00-15:59).
-    - cron: "*/15 1-7 * * 1-5"
+    # Every 5 minutes during the A-share session (China 09:00-15:59).
+    - cron: "*/5 1-7 * * 1-5"
     # Hourly full refresh (China 09:05-14:05) plus the post-close snapshot.
     - cron: "5 1-6 * * 1-5"
     - cron: "10 7 * * 1-5"
@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: static-dashboard-pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
