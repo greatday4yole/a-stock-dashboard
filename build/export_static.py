@@ -21,7 +21,7 @@ from typing import Any
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 SLOW_KEYS = {"tomorrow-plans", "paper-t", "paper-t-history"}
-DEFAULT_HISTORY_DAYS = 8
+DEFAULT_HISTORY_DAYS = 10
 
 
 def log(message: str) -> None:
