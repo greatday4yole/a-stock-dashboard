@@ -100,6 +100,7 @@
   function finishUnlock(key, remember) {
     cryptoKeyPromise = Promise.resolve(key);
     unlocked = true;
+    document.documentElement.classList.remove("asd-gate-open");
     if (remember) {
       try {
         window.crypto.subtle.exportKey("raw", key).then(function (raw) {
@@ -109,6 +110,9 @@
     }
     releaseUnlock();
     removeGate();
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
   }
 
   function trySavedKey() {
@@ -256,7 +260,9 @@
   function gateStyles() {
     var style = document.createElement("style");
     style.textContent = [
-      "#asd-static-gate{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.82);backdrop-filter:blur(6px);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;}",
+      "#asd-static-gate{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:20px;box-sizing:border-box;background:rgba(15,23,42,.82);backdrop-filter:blur(6px);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;}",
+      "html.asd-gate-open,html.asd-gate-open body{overflow:hidden;}",
+      "#asd-static-gate .asd-card{margin:auto;}",
       "#asd-static-gate .asd-card{width:min(420px,calc(100vw - 40px));background:#fff;border-radius:16px;padding:28px 28px 22px;box-shadow:0 24px 80px rgba(0,0,0,.35);color:#0f172a;}",
       "#asd-static-gate h2{margin:0 0 8px;font-size:20px;line-height:1.3;}",
       "#asd-static-gate p{margin:0 0 16px;color:#475569;font-size:13px;line-height:1.6;}",
@@ -276,16 +282,41 @@
     if (gate) gate.remove();
   }
 
+  function positionGate(gate) {
+    var vv = window.visualViewport;
+    if (!vv) return;
+    gate.style.left = vv.offsetLeft + "px";
+    gate.style.top = vv.offsetTop + "px";
+    gate.style.right = "auto";
+    gate.style.bottom = "auto";
+    gate.style.width = vv.width + "px";
+    gate.style.height = vv.height + "px";
+  }
+
+  function watchViewport(gate) {
+    var reposition = function () {
+      if (gate.isConnected) positionGate(gate);
+    };
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", reposition);
+      window.visualViewport.addEventListener("scroll", reposition);
+    }
+    window.addEventListener("resize", reposition);
+  }
+
   function showGate() {
     if (document.getElementById("asd-static-gate")) return;
     gateStyles();
+    document.documentElement.classList.add("asd-gate-open");
     var gate = document.createElement("div");
     gate.id = "asd-static-gate";
+    gate.setAttribute("role", "dialog");
+    gate.setAttribute("aria-modal", "true");
     gate.innerHTML = [
       '<form class="asd-card" id="asd-static-gate-form" autocomplete="on">',
       "<h2>持仓行情 · 访问验证</h2>",
       "<p>该站点包含个人持仓与盈亏数据。请输入部署者设置的访问密码；密码只在本机浏览器中用于解密，不会上传。</p>",
-      '<input id="asd-static-gate-password" type="password" required autocomplete="current-password" placeholder="访问密码" autofocus>',
+      '<input id="asd-static-gate-password" type="password" required autocomplete="current-password" placeholder="访问密码">',
       '<div class="asd-row"><label><input id="asd-static-gate-remember" type="checkbox" checked> 记住此设备</label><span>HTTPS 加密传输</span></div>',
       '<button id="asd-static-gate-submit" type="submit">进入</button>',
       '<p class="asd-error" id="asd-static-gate-error" role="alert"></p>',
@@ -293,12 +324,17 @@
       "</form>",
     ].join("");
     document.documentElement.appendChild(gate);
+    positionGate(gate);
+    watchViewport(gate);
 
     var form = document.getElementById("asd-static-gate-form");
     var input = document.getElementById("asd-static-gate-password");
     var submit = document.getElementById("asd-static-gate-submit");
     var errorBox = document.getElementById("asd-static-gate-error");
-    setTimeout(function () { input.focus(); }, 50);
+    setTimeout(function () {
+      var coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+      if (!coarse) input.focus();
+    }, 50);
 
     form.addEventListener("submit", function (event) {
       event.preventDefault();

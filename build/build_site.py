@@ -55,6 +55,10 @@ def encrypt_json(key: bytes, payload: Any) -> bytes:
 
 
 def rewrite_html(html: str, is_autopilot: bool) -> str:
+    html = html.replace(
+        'content="width=device-width, initial-scale=1"',
+        'content="width=device-width, initial-scale=1, minimum-scale=1"',
+    )
     html = html.replace('href="/styles.css', 'href="styles.css')
     html = html.replace('href="/autopilot.html', 'href="autopilot.html')
     html = html.replace('href="/"', 'href="./"')
@@ -121,6 +125,13 @@ def main() -> int:
 
     log("copying static assets")
     copy_static(source, out)
+    overrides = Path("build/static-overrides.css")
+    if overrides.is_file():
+        css_path = out / "styles.css"
+        css_path.write_text(
+            css_path.read_text(encoding="utf-8") + "\n" + overrides.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
 
     shim = Path("build/static-api-shim.js")
     if not shim.is_file():

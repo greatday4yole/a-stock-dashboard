@@ -1,0 +1,34 @@
+/* Static-deployment layout guards.
+ *
+ * `main` is a CSS grid whose implicit column is sized by the max-content width
+ * of wide tables.  On phones that expands the layout to ~1600px and defeats
+ * the dashboard's own mobile breakpoints.  Constraining the column to 1fr
+ * keeps the page at the device width; wide tables scroll inside their own
+ * wrappers.
+ */
+main {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+#portfolio-view {
+  min-width: 0;
+}
+
+/* The static deployment is read-only; creating a portfolio cannot work. */
+.portfolio-add-button {
+  display: none !important;
+}
+
+@media (max-width: 760px) {
+  .topbar {
+    flex-wrap: wrap;
+  }
+
+  .brand-line h1 {
+    white-space: nowrap;
+  }
+
+  .topbar-actions {
+    flex-wrap: wrap;
+  }
+}
