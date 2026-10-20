@@ -12,7 +12,7 @@ on:
     - cron: "10 7 * * 1-5"
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -123,6 +123,21 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
+      # GitHub disables scheduled workflows after 60 days without repository
+      # activity.  A small weekly commit keeps the schedule alive.
+      - name: Weekly heartbeat commit
+        if: github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          if [ "$(date -u +%u)" = "1" ]; then
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .heartbeat
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .heartbeat
+            git commit -m "chore: weekly heartbeat" || true
+            git push || true
+          fi
 
       - name: Server log tail on failure
         if: failure()
