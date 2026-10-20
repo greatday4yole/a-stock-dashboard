@@ -63,6 +63,31 @@ jobs:
           test -f config/portfolio.json
           test -f data/dashboard-quote-cache.json
 
+      - name: Align quote-cache mtimes
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          cache_path = Path("data/dashboard-quote-cache.json")
+          if not cache_path.is_file():
+              print("no quote cache; skip")
+              raise SystemExit(0)
+          cache = json.loads(cache_path.read_text(encoding="utf-8"))
+          payload = cache.get("payload") or {}
+          portfolio = Path("config/portfolio.json")
+          extras = Path("config/portfolios.json")
+          if portfolio.is_file():
+              ns = portfolio.stat().st_mtime_ns
+              cache["portfolio_config_mtime_ns"] = ns
+              if isinstance(payload.get("portfolio"), dict):
+                  payload["portfolio"]["config_mtime_ns"] = ns
+          if extras.is_file():
+              payload["extras_config_mtime_ns"] = extras.stat().st_mtime_ns
+          cache["payload"] = payload
+          cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+          print("aligned quote cache mtimes", cache.get("portfolio_config_mtime_ns"), payload.get("extras_config_mtime_ns"))
+          PY
+
       - name: Start dashboard server
         run: |
           set -euo pipefail

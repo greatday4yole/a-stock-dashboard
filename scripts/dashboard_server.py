@@ -344,10 +344,42 @@ INDEXES = [
 
 TENCENT_GLOBALS = [
     ("hkHSI", "恒生指数"),
+    ("hkHSTECH", "恒生科技"),
     ("usINX", "标普500"),
     ("usIXIC", "纳斯达克"),
+    ("usNDX", "纳斯达克100"),
     ("usDJI", "道琼斯"),
+    ("usSOXX", "费城半导体ETF"),
+    ("usSMH", "半导体ETF"),
+    ("usNVDA", "英伟达"),
+    ("usMU", "美光科技"),
+    ("usTSM", "台积电"),
+    ("usASML", "阿斯麦"),
+    ("usAMD", "超威半导体"),
+    ("usAVGO", "博通"),
+    ("usQCOM", "高通"),
+    ("usINTC", "英特尔"),
+    ("usAMAT", "应用材料"),
+    ("usLRCX", "拉姆研究"),
+    ("usKLAC", "科磊"),
+    ("usARM", "Arm"),
+    ("usMRVL", "迈威尔科技"),
+    ("usWDC", "西部数据"),
+    ("usSTX", "希捷科技"),
+    ("usSNDK", "闪迪"),
+    ("usIWM", "罗素2000ETF"),
+    ("usVIXY", "VIX短期期货ETF"),
 ]
+# 全球参考里的美股/港股图表统一走腾讯：usfqkline 日K + minute/query 分时。
+TENCENT_GLOBAL_CHART_INSTRUMENTS: dict[str, tuple[str, str]] = {
+    **{
+        symbol: (name, "tencent_us")
+        for symbol, name in TENCENT_GLOBALS
+        if symbol.startswith("us")
+    },
+    "hkHSI": ("恒生指数", "tencent_hk"),
+    "hkHSTECH": ("恒生科技", "tencent_hk"),
+}
 
 SINA_GLOBALS: dict[str, tuple[str, str, str]] = {
     "hf_ES": ("标普500期货", "future", "点"),
@@ -424,10 +456,10 @@ def _data_source_chains_snapshot() -> dict[str, Any]:
 # 东财 ulist 批量行情一次请求取全部（105=纳斯达克，106=纽交所，153=OTC，
 # 101=COMEX，100=全球指数）；SK海力士东财不覆盖韩国个股，行情与日K走 Naver。
 # SpaceX 未上市无行情代码，纳斯达克中国金龙指数(HXC)东财亦无行情，均不入列。
-EM_OVERNIGHT_INSTRUMENTS: list[dict[str, str]] = [
-    {"symbol": "b_FTSE", "name": "英国富时100", "em_secid": "100.FTSE", "group": "欧股指数"},
-    {"symbol": "b_GDAXI", "name": "德国DAX", "em_secid": "100.GDAXI", "group": "欧股指数"},
-    {"symbol": "b_FCHI", "name": "法国CAC40", "em_secid": "100.FCHI", "group": "欧股指数"},
+EM_OVERNIGHT_INSTRUMENTS: list[dict[str, Any]] = [
+    {"symbol": "b_FTSE", "name": "英国富时100", "em_secid": "100.FTSE", "group": "欧股指数", "global": True},
+    {"symbol": "b_GDAXI", "name": "德国DAX", "em_secid": "100.GDAXI", "group": "欧股指数", "global": True},
+    {"symbol": "b_FCHI", "name": "法国CAC40", "em_secid": "100.FCHI", "group": "欧股指数", "global": True},
     {"symbol": "b_CL", "name": "纽约原油", "em_secid": "102.CL00Y", "group": "商品"},
     {"symbol": "b_GC", "name": "纽约黄金", "em_secid": "101.GC00Y", "group": "商品"},
     {"symbol": "b_SI", "name": "COMEX白银", "em_secid": "101.SI00Y", "group": "商品"},
@@ -443,7 +475,9 @@ EM_OVERNIGHT_INSTRUMENTS: list[dict[str, str]] = [
     {"symbol": "b_STX", "name": "希捷科技", "em_secid": "105.STX", "group": "存储链"},
     {"symbol": "b_WDC", "name": "西部数据", "em_secid": "105.WDC", "group": "存储链"},
     {"symbol": "b_MU", "name": "美光科技", "em_secid": "105.MU", "group": "存储链"},
-    {"symbol": "b_SKHYNIX", "name": "SK海力士", "naver_symbol": "000660", "group": "存储链"},
+    {"symbol": "b_SKHYNIX", "name": "SK海力士", "naver_symbol": "000660", "group": "存储链", "global": True},
+    {"symbol": "b_SAMSUNG", "name": "三星电子", "naver_symbol": "005930", "group": "存储链", "global": True},
+    {"symbol": "b_TWII", "name": "台湾加权", "em_secid": "100.TWII", "group": "全球指数", "global": True},
     {"symbol": "b_RKLB", "name": "Rocket Lab", "em_secid": "105.RKLB", "group": "太空概念"},
     {"symbol": "b_LUNR", "name": "Intuitive Machines", "em_secid": "105.LUNR", "group": "太空概念"},
     {"symbol": "b_ASTS", "name": "AST SpaceMobile", "em_secid": "105.ASTS", "group": "太空概念"},
@@ -492,6 +526,13 @@ INDEX_CHART_INSTRUMENTS: dict[str, dict[str, str]] = {
     "fx_susdcnh": {"name": "USD/CNH", "kind": "eastmoney", "secid": "133.USDCNH"},
     "US10Y": {"name": "美债收益率", "kind": "eastmoney", "secid": "171.US10Y"},
 }
+
+INDEX_CHART_INSTRUMENTS.update(
+    {
+        symbol: {"name": name, "kind": kind}
+        for symbol, (name, kind) in TENCENT_GLOBAL_CHART_INSTRUMENTS.items()
+    }
+)
 
 INDEX_CHART_LOOKUP: dict[str, str] = {
     key.lower(): key for key in INDEX_CHART_INSTRUMENTS
@@ -2685,10 +2726,15 @@ for _overnight_item in EM_OVERNIGHT_INSTRUMENTS:
             "tz": "Europe/London" if _overnight_symbol == "b_FTSE" else "Europe/Paris",
             "windows": ((daytime(8, 0), daytime(16, 35)),),
         }
-    elif _overnight_symbol == "b_SKHYNIX":
+    elif _overnight_symbol in {"b_SKHYNIX", "b_SAMSUNG"}:
         GLOBAL_CHART_SESSIONS[_overnight_symbol] = {
             "tz": "Asia/Seoul",
             "windows": ((daytime(9, 0), daytime(15, 30)),),
+        }
+    elif _overnight_symbol == "b_TWII":
+        GLOBAL_CHART_SESSIONS[_overnight_symbol] = {
+            "tz": "Asia/Taipei",
+            "windows": ((daytime(9, 0), daytime(13, 30)),),
         }
     elif str(_overnight_item.get("em_secid") or "").split(".", 1)[0] in {"105", "106", "153"}:
         GLOBAL_CHART_SESSIONS[_overnight_symbol] = {
@@ -2697,6 +2743,17 @@ for _overnight_item in EM_OVERNIGHT_INSTRUMENTS:
         }
     else:
         GLOBAL_CHART_CONTINUOUS.add(_overnight_symbol)
+
+GLOBAL_CHART_SESSIONS["hkHSTECH"] = {
+    "tz": "Asia/Hong_Kong",
+    "windows": ((daytime(9, 30), daytime(12, 0)), (daytime(13, 0), daytime(16, 10))),
+}
+for _global_chart_symbol in TENCENT_GLOBAL_CHART_INSTRUMENTS:
+    if _global_chart_symbol.startswith("us"):
+        GLOBAL_CHART_SESSIONS[_global_chart_symbol] = {
+            "tz": "America/New_York",
+            "windows": ((daytime(9, 30), daytime(16, 10)),),
+        }
 CHART_GLOBAL_OPEN_TTL_SECONDS = 60.0
 CHART_CLOSED_PRE_OPEN_BUFFER_SECONDS = 300.0
 CHART_CLOSED_MIN_TTL_SECONDS = 900.0
@@ -2937,6 +2994,70 @@ def _fetch_naver_daily_chart(
     return _parse_naver_daily_bars(response.content.decode("euc-kr", errors="replace"), count)
 
 
+def _fetch_naver_intraday_chart(
+    symbol: str, *, fallback_date: str | None = None
+) -> dict[str, Any]:
+    """Naver 分钟线（韩国个股）：siseJson timeframe=minute。
+
+    Naver 分钟接口只给收盘价/累计成交量，没有逐分钟 OHLC；这里用收盘价
+    合成线型 bar，供前端分时图使用。只保留韩国常规时段 09:00-15:30（KST），
+    过滤掉盘后报价。
+    """
+
+    observed = _now()
+    day = observed.strftime("%Y%m%d")
+    response = LIVE_SESSION.get(
+        "https://api.finance.naver.com/siseJson.naver",
+        params={
+            "symbol": symbol,
+            "requestType": "1",
+            "startTime": day,
+            "endTime": day,
+            "timeframe": "minute",
+        },
+        headers={"User-Agent": UA, "Referer": "https://finance.naver.com/"},
+        timeout=(2.5, 8.0),
+    )
+    response.raise_for_status()
+    text = response.content.decode("utf-8", errors="replace")
+    parsed: dict[str, tuple[dict[str, Any], str]] = {}
+    pattern = re.compile(
+        r'\["(\d{12})"\s*,\s*(?:null|[-\d.]+)\s*,\s*(?:null|[-\d.]+)\s*,'
+        r'\s*(?:null|[-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,'
+        r'\s*(?:null|[-\d.]+)\]'
+    )
+    for match in pattern.finditer(text):
+        stamp, close_raw, volume_raw = match.groups()
+        hhmm = stamp[8:12]
+        if not ("0900" <= hhmm <= "1530"):
+            continue
+        close = _float(close_raw)
+        if close is None or close <= 0:
+            continue
+        bar = _parse_chart_bar(
+            [stamp, close, close, close, close, _float(volume_raw) or 0.0],
+            intraday=True,
+            fallback_date=fallback_date,
+        )
+        if bar is not None:
+            parsed[bar[0]["time"]] = bar
+    if not parsed:
+        raise RuntimeError(f"Naver returned no intraday points for {symbol}")
+    latest_trade_date = max(trade_date for _, trade_date in parsed.values())
+    items = [
+        bar
+        for key, (bar, trade_date) in sorted(parsed.items())
+        if trade_date == latest_trade_date
+    ]
+    return {
+        "trade_date": latest_trade_date,
+        "period": "m1",
+        "prev_close": None,
+        "items": items,
+        "source": "Naver财经分时",
+    }
+
+
 SINA_GLOBAL_FUTURES_DAILY = (
     "https://stock2.finance.sina.com.cn/futures/api/jsonp.php"
     "/var%20t=/GlobalFuturesService.getGlobalFuturesDailyKLine"
@@ -2997,6 +3118,120 @@ def _fetch_sina_global_futures_daily_chart(
     }
 
 
+SINA_US_KLINE = (
+    "https://stock.finance.sina.com.cn/usstock/api/jsonp.php"
+    "/var%20t=/US_MinKService.getDailyK"
+)
+SINA_US_MINUTE = (
+    "https://stock.finance.sina.com.cn/usstock/api/jsonp.php"
+    "/var%20t=/US_MinKService.getMinK"
+)
+
+
+def _sina_us_code(symbol: str) -> str:
+    raw = str(symbol or "").strip()
+    return raw[2:] if raw.lower().startswith("us") else raw
+
+
+def _parse_sina_jsonp_rows(text: str) -> list[dict[str, Any]]:
+    start = text.find("(")
+    end = text.rfind(")")
+    if start < 0 or end <= start:
+        raise RuntimeError("Sina US quote endpoint returned no JSONP payload")
+    rows = json.loads(text[start + 1 : end])
+    if not isinstance(rows, list):
+        raise RuntimeError("Sina US quote endpoint returned a non-list payload")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _fetch_sina_us_daily_chart(
+    symbol: str, count: int = STOCK_CHART_DAILY_COUNT
+) -> dict[str, Any]:
+    """新浪美股日K：腾讯 usfqkline 对个股只返回最近两根 bar，需用新浪补全。"""
+
+    response = LIVE_SESSION.get(
+        SINA_US_KLINE,
+        params={"symbol": _sina_us_code(symbol), "___qn": "3"},
+        headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"},
+        timeout=(2.5, 10.0),
+    )
+    response.raise_for_status()
+    rows = _parse_sina_jsonp_rows(response.text)
+    parsed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        bar = _parse_chart_bar(
+            [
+                row.get("d"),
+                row.get("o"),
+                row.get("c"),
+                row.get("h"),
+                row.get("l"),
+                row.get("v"),
+            ],
+            intraday=False,
+        )
+        if bar is not None:
+            parsed[bar[0]["time"]] = bar[0]
+    items = [parsed[key] for key in sorted(parsed)][-max(1, int(count)) :]
+    if not items:
+        raise RuntimeError(f"Sina returned no valid US daily bars for {symbol}")
+    return {
+        "adjustment": "none",
+        "period": "day",
+        "items": items,
+        "source": "新浪财经美股日K",
+    }
+
+
+def _fetch_sina_us_intraday_chart(
+    symbol: str,
+    *,
+    fallback_date: str | None = None,
+    count: int = STOCK_CHART_MINUTE_COUNT,
+) -> dict[str, Any]:
+    """新浪美股 5 分钟线：腾讯 minute/query 对美股个股只返回一个点。"""
+
+    response = LIVE_SESSION.get(
+        SINA_US_MINUTE,
+        params={"symbol": _sina_us_code(symbol), "type": "5"},
+        headers={"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"},
+        timeout=(2.5, 10.0),
+    )
+    response.raise_for_status()
+    rows = _parse_sina_jsonp_rows(response.text)
+    parsed: dict[str, tuple[dict[str, Any], str]] = {}
+    for row in rows:
+        bar = _parse_chart_bar(
+            [
+                row.get("d"),
+                row.get("o"),
+                row.get("c"),
+                row.get("h"),
+                row.get("l"),
+                row.get("v"),
+            ],
+            intraday=True,
+            fallback_date=fallback_date,
+        )
+        if bar is not None:
+            parsed[bar[0]["time"]] = bar
+    if not parsed:
+        raise RuntimeError(f"Sina returned no valid US intraday bars for {symbol}")
+    latest_trade_date = max(trade_date for _, trade_date in parsed.values())
+    items = [
+        bar
+        for key, (bar, trade_date) in sorted(parsed.items())
+        if trade_date == latest_trade_date
+    ][-max(1, int(count)) :]
+    return {
+        "trade_date": latest_trade_date,
+        "period": "m5",
+        "prev_close": None,
+        "items": items,
+        "source": "新浪财经美股5分钟K线",
+    }
+
+
 def _fetch_chart_daily(instrument: dict[str, Any]) -> dict[str, Any]:
     """Dispatch the daily chart fetch by instrument kind.
 
@@ -3025,6 +3260,14 @@ def _fetch_chart_daily(instrument: dict[str, Any]) -> dict[str, Any]:
         daily = _fetch_sina_global_futures_daily_chart(str(instrument["sina_symbol"]))
     elif str(instrument.get("chart_kind") or "") == "tencent_us":
         daily = _fetch_tencent_us_index_daily_chart(instrument["symbol"])
+        # 腾讯 usfqkline 对美股个股只给最近两根日K；少于 30 根时用新浪补全。
+        if len(daily.get("items") or []) < 30:
+            try:
+                sina_daily = _fetch_sina_us_daily_chart(instrument["symbol"])
+                if len(sina_daily.get("items") or []) > len(daily.get("items") or []):
+                    daily = sina_daily
+            except Exception:
+                pass
     else:
         # A股个股/指数日K主备线：腾讯 newfqkline 三主机 → 东财 push2his(fqt=1)。
         daily = _fetch_cn_stock_daily_chart(instrument["symbol"])
@@ -3039,7 +3282,10 @@ def _fetch_chart_intraday(
 ) -> dict[str, Any]:
     kind = str(instrument.get("chart_kind") or "")
     if kind == "naver":
-        raise RuntimeError("Naver 无分时数据源")
+        return _fetch_naver_intraday_chart(
+            str(instrument.get("naver_symbol") or instrument["symbol"]),
+            fallback_date=fallback_date,
+        )
     if kind == "eastmoney":
         return _fetch_eastmoney_intraday_chart(
             instrument["secid"], fallback_date=fallback_date
@@ -3047,9 +3293,20 @@ def _fetch_chart_intraday(
     if kind == "sina_futures":
         raise RuntimeError("新浪全球期货无分时数据源")
     if kind in {"tencent_hk", "tencent_us"}:
-        return _fetch_tencent_global_intraday_chart(
+        chart = _fetch_tencent_global_intraday_chart(
             instrument["symbol"], fallback_date=fallback_date
         )
+        if len(chart.get("items") or []) >= 2:
+            return chart
+        if kind == "tencent_us":
+            # 腾讯 minute/query 对美股个股只返回一个点，改用新浪 5 分钟线。
+            try:
+                return _fetch_sina_us_intraday_chart(
+                    instrument["symbol"], fallback_date=fallback_date
+                )
+            except Exception:
+                pass
+        return chart
     try:
         chart = _fetch_tencent_intraday_chart(instrument["symbol"], fallback_date=fallback_date)
     except Exception as exc:
@@ -4459,96 +4716,104 @@ _EM_OVERNIGHT_CACHE: dict[str, Any] = {"monotonic": 0.0, "rows": []}
 
 
 def _fetch_em_overnight_quotes() -> list[dict[str, Any]]:
-    """隔夜全球标的行情：东财 ulist 批量取美股/欧股/白银，SK海力士走 Naver。
+    """隔夜全球标的行情：东财 ulist 批量取美股/欧股/白银，韩股走 Naver。
 
     ulist 单次请求覆盖全部 secid（共享东财节流），f12=代码按 em_secid 尾段
-    映射回配置项；停牌/无效报价（f2 非正数）跳过。SK海力士行情由 Naver 日K
-    最近两根 bar 推导（当日盘中 bar 为实时快照），失败不阻断其余标的。
+    映射回配置项；停牌/无效报价（f2 非正数）跳过。SK海力士/三星电子等
+    韩国个股由 Naver 日K最近两根 bar 推导。东财被 WAF 拦截时，Naver
+    部分仍独立返回，不因单一数据源失败而整块为空。
     """
 
     cached_rows = _EM_OVERNIGHT_CACHE["rows"]
     if cached_rows and time.monotonic() - _EM_OVERNIGHT_CACHE["monotonic"] < EM_OVERNIGHT_TTL_SECONDS:
         return [dict(row) for row in cached_rows]
 
-    batched = [item for item in EM_OVERNIGHT_INSTRUMENTS if item.get("em_secid")]
-    payload = _curl_get_json(
-        "https://push2.eastmoney.com/api/qt/ulist.np/get?secids="
-        + ",".join(str(item["em_secid"]) for item in batched)
-        + "&fields=f2,f3,f4,f12,f14,f15,f16,f18,f124&fltt=2",
-        referer="https://quote.eastmoney.com/",
-    )
-    data = payload.get("data") or {}
-    diff = data.get("diff") or []
-    if isinstance(diff, dict):
-        diff = list(diff.values())
-    by_code = {str(row.get("f12") or ""): row for row in diff if isinstance(row, dict)}
-
     rows: list[dict[str, Any]] = []
-    for item in batched:
-        row = by_code.get(str(item["em_secid"]).split(".", 1)[1])
-        if not row:
-            continue
-        price = _float(row.get("f2"))
-        if price is None or price <= 0:
-            continue
-        previous = _float(row.get("f18"))
-        change = _float(row.get("f4"))
-        change_pct = _float(row.get("f3"))
-        if change is None and previous not in (None, 0):
-            change = price - previous
-        if change_pct is None and change is not None and previous not in (None, 0):
-            change_pct = change / previous * 100
-        quote_ts = _float(row.get("f124"))
-        quote_time = (
-            datetime.fromtimestamp(quote_ts, CN_TZ).isoformat(timespec="seconds")
-            if quote_ts and quote_ts > 0
-            else ""
-        )
-        rows.append(
-            {
-                "symbol": item["symbol"],
-                "name": item["name"],
-                "group": item["group"],
-                "price": _safe_round(price, 4),
-                "change": _safe_round(change, 4),
-                "change_pct": _safe_round(change_pct, 3),
-                "high": _safe_round(_float(row.get("f15")), 4),
-                "low": _safe_round(_float(row.get("f16")), 4),
-                "quote_time": quote_time,
-                "unit": "点" if item["group"] == "欧股指数" else "美元",
-                "source": "东方财富",
-            }
-        )
-
+    batched = [item for item in EM_OVERNIGHT_INSTRUMENTS if item.get("em_secid")]
     try:
-        naver_daily = _fetch_naver_daily_chart("000660", count=2)
-        naver_items = naver_daily.get("items") or []
-        if len(naver_items) >= 2:
-            latest, prior = naver_items[-1], naver_items[-2]
-            latest_close = _float(latest.get("close"))
-            prior_close = _float(prior.get("close"))
-            if latest_close and prior_close:
-                rows.append(
-                    {
-                        "symbol": "b_SKHYNIX",
-                        "name": "SK海力士",
-                        "group": "存储链",
-                        "price": _safe_round(latest_close, 0),
-                        "change": _safe_round(latest_close - prior_close, 0),
-                        "change_pct": _safe_round((latest_close / prior_close - 1) * 100, 3),
-                        "high": _safe_round(_float(latest.get("high")), 0),
-                        "low": _safe_round(_float(latest.get("low")), 0),
-                        "quote_time": str(latest.get("time") or ""),
-                        "unit": "韩元",
-                        "source": "Naver财经(日K推导)",
-                    }
-                )
+        payload = _curl_get_json(
+            "https://push2.eastmoney.com/api/qt/ulist.np/get?secids="
+            + ",".join(str(item["em_secid"]) for item in batched)
+            + "&fields=f2,f3,f4,f12,f14,f15,f16,f18,f124&fltt=2",
+            referer="https://quote.eastmoney.com/",
+        )
+        data = payload.get("data") or {}
+        diff = data.get("diff") or []
+        if isinstance(diff, dict):
+            diff = list(diff.values())
+        by_code = {str(row.get("f12") or ""): row for row in diff if isinstance(row, dict)}
+        for item in batched:
+            row = by_code.get(str(item["em_secid"]).split(".", 1)[1])
+            if not row:
+                continue
+            price = _float(row.get("f2"))
+            if price is None or price <= 0:
+                continue
+            previous = _float(row.get("f18"))
+            change = _float(row.get("f4"))
+            change_pct = _float(row.get("f3"))
+            if change is None and previous not in (None, 0):
+                change = price - previous
+            if change_pct is None and change is not None and previous not in (None, 0):
+                change_pct = change / previous * 100
+            quote_ts = _float(row.get("f124"))
+            quote_time = (
+                datetime.fromtimestamp(quote_ts, CN_TZ).isoformat(timespec="seconds")
+                if quote_ts and quote_ts > 0
+                else ""
+            )
+            rows.append(
+                {
+                    "symbol": item["symbol"],
+                    "name": item["name"],
+                    "group": item["group"],
+                    "price": _safe_round(price, 4),
+                    "change": _safe_round(change, 4),
+                    "change_pct": _safe_round(change_pct, 3),
+                    "high": _safe_round(_float(row.get("f15")), 4),
+                    "low": _safe_round(_float(row.get("f16")), 4),
+                    "quote_time": quote_time,
+                    "unit": "点" if item["group"] in {"欧股指数", "全球指数"} else "美元",
+                    "source": "东方财富",
+                }
+            )
     except Exception:
         pass
 
+    for item in EM_OVERNIGHT_INSTRUMENTS:
+        naver_symbol = str(item.get("naver_symbol") or "")
+        if not naver_symbol:
+            continue
+        try:
+            naver_daily = _fetch_naver_daily_chart(naver_symbol, count=2)
+            naver_items = naver_daily.get("items") or []
+            if len(naver_items) < 2:
+                continue
+            latest, prior = naver_items[-1], naver_items[-2]
+            latest_close = _float(latest.get("close"))
+            prior_close = _float(prior.get("close"))
+            if not latest_close or not prior_close:
+                continue
+            rows.append(
+                {
+                    "symbol": item["symbol"],
+                    "name": item["name"],
+                    "group": item["group"],
+                    "price": _safe_round(latest_close, 0),
+                    "change": _safe_round(latest_close - prior_close, 0),
+                    "change_pct": _safe_round((latest_close / prior_close - 1) * 100, 3),
+                    "high": _safe_round(_float(latest.get("high")), 0),
+                    "low": _safe_round(_float(latest.get("low")), 0),
+                    "quote_time": str(latest.get("time") or ""),
+                    "unit": "韩元",
+                    "source": "Naver财经(日K推导)",
+                }
+            )
+        except Exception:
+            continue
+
     if not rows:
-        raise RuntimeError("eastmoney ulist returned no overnight quotes")
-    # SK海力士等非东财来源的行是后追加的，按配置顺序排序保证分组展示连续。
+        raise RuntimeError("eastmoney/naver returned no overnight quotes")
     _overnight_order = {item["symbol"]: idx for idx, item in enumerate(EM_OVERNIGHT_INSTRUMENTS)}
     rows.sort(key=lambda row: _overnight_order.get(row["symbol"], len(_overnight_order)))
     _EM_OVERNIGHT_CACHE["rows"] = rows
@@ -5191,6 +5456,14 @@ def _build_quotes_payload() -> dict[str, Any]:
             _record_data_source_chain("us10y_yield", "down", "", type(exc).__name__)
     try:
         overnight = _fetch_em_overnight_quotes()
+        global_extra_symbols = {
+            str(item["symbol"])
+            for item in EM_OVERNIGHT_INSTRUMENTS
+            if item.get("global")
+        }
+        globals_.extend(
+            row for row in overnight if str(row.get("symbol") or "") in global_extra_symbols
+        )
     except Exception as exc:
         overnight = []
         errors.append(f"隔夜全球标的暂不可用：{type(exc).__name__}")

@@ -98,6 +98,12 @@ const LEADING_SPARK_KEYS = Object.freeze([
 const GLOBAL_CHART_SYMBOLS = new Set([
   "b_KOSPI", "b_NKY", "hkHSI", "usINX", "usIXIC", "usDJI",
   "hf_ES", "hf_NQ", "DINIW", "fx_susdcnh", "US10Y",
+  // 全球参考新增：海外半导体/科技个股、半导体 ETF 与更多指数。
+  "usNDX", "hkHSTECH", "usSOXX", "usSMH", "usIWM", "usVIXY",
+  "usNVDA", "usMU", "usTSM", "usASML", "usAMD", "usAVGO", "usQCOM",
+  "usINTC", "usAMAT", "usLRCX", "usKLAC", "usARM", "usMRVL",
+  "usWDC", "usSTX", "usSNDK",
+  "b_SAMSUNG", "b_TWII",
   // 隔夜全球标的（与后端 EM_OVERNIGHT_INSTRUMENTS / INDEX_CHART_INSTRUMENTS 对应）。
   "b_FTSE", "b_GDAXI", "b_FCHI", "b_CL", "b_GC", "b_SI", "b_HG",
   "b_MSFT", "b_META", "b_NVDA", "b_GOOGL", "b_AAPL", "b_AMZN", "b_TSLA",
@@ -3303,12 +3309,12 @@ function renderGlobals() {
   }
   // 纽约原油/黄金（hf_CL/hf_GC）已并入隔夜全球标的的商品组，全球参考不再重复展示；
   // 旧行情缓存仍会带出这两行，渲染时过滤。
-  for (const market of state.globals.filter((row) => row.symbol !== "hf_CL" && row.symbol !== "hf_GC").slice(0, 13)) {
+  for (const market of state.globals.filter((row) => row.symbol !== "hf_CL" && row.symbol !== "hf_GC").slice(0, 60)) {
     const symbol = normalizeChartSymbol(market.symbol);
     const chartable = symbol && GLOBAL_CHART_SYMBOLS.has(symbol);
     const quoteTitle = market.quoteTime ? `报价 ${formatDateTime(market.quoteTime)}${market.isStale ? " · 延迟" : ""}` : "";
     const value = span(`${formatPrice(market.price)}  ${formatPct(market.changePct)}`, directionClass(market.changePct));
-    // 全球参考 13 项均已配置图表数据源（海外指数走东财/腾讯，ES/NQ 期货走新浪日K）；
+    // 全球参考中的海外指数/个股均已配置图表数据源（美股/港股走腾讯，韩股走 Naver，欧股/台湾走东财，ES/NQ 期货走新浪）；
     // 无分时源的品种弹层里分时面板显示空态。
     const item = chartable ? document.createElement("button") : div("global-item");
     if (chartable) {
