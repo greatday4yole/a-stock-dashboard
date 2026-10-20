@@ -22,6 +22,7 @@ main {
 @media (max-width: 760px) {
   .topbar {
     flex-wrap: wrap;
+    align-items: flex-start;
   }
 
   .brand-line h1 {
@@ -30,5 +31,16 @@ main {
 
   .topbar-actions {
     flex-wrap: wrap;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  #freshness-text {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
+
+  .section-heading h2 {
+    white-space: nowrap;
   }
 }
