@@ -21,6 +21,12 @@ from typing import Any
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 SLOW_KEYS = {"tomorrow-plans", "paper-t", "paper-t-history"}
+# 5 分钟 fast run 只重抓核心海外标的图表；其余全球图表沿用最近一次完整
+# 构建的加密缓存，避免 169 个 key 每 5 分钟全部重抓导致任务排队。
+FAST_GLOBAL_CHART_SYMBOLS = {
+    "hkHSI", "hkHSTECH", "usINX", "usIXIC", "usNDX", "usDJI",
+    "usNVDA", "usMU", "usSOXX", "usSMH", "b_SKHYNIX", "b_SAMSUNG",
+}
 DEFAULT_HISTORY_DAYS = 10
 
 
@@ -199,8 +205,11 @@ def main() -> int:
     save("opportunities", "/api/opportunities", timeout=120)
     save("rebalance", "/api/rebalance", timeout=120)
     save("school-signals", "/api/school-signals", timeout=120)
-    save("leading-indicators", "/api/leading-indicators", timeout=120)
-    save("derivatives-regime", "/api/derivatives-regime", timeout=120)
+    if not args.fast:
+        save("leading-indicators", "/api/leading-indicators", timeout=120)
+        save("derivatives-regime", "/api/derivatives-regime", timeout=120)
+    else:
+        log("skip slow leading-indicators/derivatives-regime")
     save("autopilot", "/api/autopilot", timeout=60)
     save("autopilot-journal", "/api/autopilot/journal?limit=200", timeout=60)
     save("health", "/api/health", timeout=30)
@@ -221,6 +230,9 @@ def main() -> int:
         )
     for symbol in chart_only:
         if symbol in positions:
+            continue
+        if args.fast and symbol not in FAST_GLOBAL_CHART_SYMBOLS:
+            log(f"skip fast chart {symbol}")
             continue
         save(f"stock-chart--{symbol}", f"/api/stock-chart?symbol={urllib.parse.quote(symbol)}", timeout=90)
         save(
