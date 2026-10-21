@@ -11290,6 +11290,22 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             )
             return
         parsed = urlparse(self.path)
+        # 仅供本地静态导出使用：跳过 A 股交易时段 gate，强制重建一次行情，
+        # 避免午休/收盘后的构建把加密包里的旧缓存覆盖到刚刷新的盘中快照。
+        # 仍然受 loopback-only 限制，不会暴露给外部请求。
+        if parsed.path == "/api/quotes/export-refresh":
+            try:
+                payload = _build_quotes_payload()
+                if not isinstance(payload, dict) or payload.get("ok") is not True:
+                    raise RuntimeError("quote export refresh returned an unsuccessful payload")
+                _publish_quote_payload(payload)
+                self._send_json(payload, HTTPStatus.OK)
+            except Exception as exc:
+                self._send_json(
+                    {"ok": False, "error": _redact_error(f"{type(exc).__name__}: {exc}")},
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            return
         if parsed.path == "/api/quotes":
             query = parse_qs(parsed.query)
             force = str((query.get("refresh") or [""])[0]).lower() in ("1", "true", "yes")

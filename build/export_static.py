@@ -151,7 +151,7 @@ def main() -> int:
     log("refreshing quotes")
     # Force a synchronous refresh while the A-share session is open; outside
     # the session this simply returns the persisted close snapshot.
-    quotes = save("quotes", "/api/quotes?refresh=1", timeout=180, required=True)
+    quotes = save("quotes", "/api/quotes/export-refresh", timeout=180, required=True)
     positions, chart_only = collect_symbols(quotes if isinstance(quotes, dict) else {})
     log(f"portfolios={portfolio_ids} positions={len(positions)} chart_symbols={len(chart_only)}")
 
