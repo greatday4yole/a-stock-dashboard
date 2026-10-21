@@ -19,8 +19,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: static-dashboard-pages
@@ -150,10 +148,17 @@ jobs:
           path: previous/static-api
           key: static-api-full-${{ hashFiles('build/crypto-meta.json') }}-${{ github.run_id }}
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Publish site to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: site
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          force_orphan: true
+          enable_jekyll: false
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
+          commit_message: "deploy: static dashboard snapshot"
 
       # GitHub disables scheduled workflows after 60 days without repository
       # activity.  A small weekly commit keeps the schedule alive.
@@ -173,14 +178,3 @@ jobs:
       - name: Server log tail on failure
         if: failure()
         run: tail -200 /tmp/dashboard-server.log || true
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
