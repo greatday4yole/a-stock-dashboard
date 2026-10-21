@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      fast:
+        description: "Skip slow endpoints (5-minute refresh)"
+        type: boolean
+        default: false
   schedule:
     # Every 5 minutes during the A-share session (China 09:00-15:59).
     - cron: "*/5 1-7 * * 1-5"
@@ -26,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      FULL_REFRESH: ${{ github.event_name != 'schedule' || github.event.schedule == '5 1-6 * * 1-5' || github.event.schedule == '10 7 * * 1-5' }}
+      FULL_REFRESH: ${{ !(github.event_name == 'workflow_dispatch' && inputs.fast) && (github.event_name != 'schedule' || github.event.schedule == '5 1-6 * * 1-5' || github.event.schedule == '10 7 * * 1-5') }}
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout
