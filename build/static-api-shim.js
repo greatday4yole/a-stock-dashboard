@@ -18,6 +18,9 @@
   var VERIFY_KEY = "verify";
   var STORAGE_KEY = "asd-static-key-v1";
   var MANIFEST_URL = BASE + "static-api/manifest.json";
+  function withCacheBust(url) {
+    return url + (url.indexOf("?") >= 0 ? "&" : "?") + "v=" + Date.now();
+  }
 
   var nativeFetch = window.fetch.bind(window);
   var textEncoder = new TextEncoder();
@@ -53,7 +56,7 @@
 
   function getMeta() {
     if (!metaPromise) {
-      metaPromise = nativeFetch(META_URL, { cache: "no-store" }).then(function (response) {
+      metaPromise = nativeFetch(withCacheBust(META_URL), { cache: "no-store" }).then(function (response) {
         if (!response.ok) throw new Error("无法读取加密元数据 HTTP " + response.status);
         return response.json();
       });
@@ -128,7 +131,7 @@
       return Promise.resolve(false);
     }
     return key.then(function (cryptoKey) {
-      return decryptWithKey(cryptoKey, BASE + "static-api/" + VERIFY_KEY + ".json.enc")
+      return decryptWithKey(cryptoKey, withCacheBust(BASE + "static-api/" + VERIFY_KEY + ".json.enc"))
         .then(function (verify) {
           if (!verify || verify.ok !== true) return false;
           finishUnlock(cryptoKey, false);
@@ -142,7 +145,7 @@
 
   function getManifest() {
     if (!manifestPromise) {
-      manifestPromise = nativeFetch(MANIFEST_URL, { cache: "no-store" })
+      manifestPromise = nativeFetch(withCacheBust(MANIFEST_URL), { cache: "no-store" })
         .then(function (response) { return response.ok ? response.json() : { keys: [] }; })
         .catch(function () { return { keys: [] }; });
     }
@@ -207,7 +210,7 @@
         };
       }
       return cryptoKeyPromise.then(function (cryptoKey) {
-        return decryptWithKey(cryptoKey, BASE + "static-api/" + key + ".json.enc");
+        return decryptWithKey(cryptoKey, withCacheBust(BASE + "static-api/" + key + ".json.enc"));
       }).then(function (payload) {
         jsonCache.set(key, payload);
         return payload;
@@ -346,7 +349,7 @@
       getMeta()
         .then(function (meta) { return deriveKey(password, meta); })
         .then(function (key) {
-          return decryptWithKey(key, BASE + "static-api/" + VERIFY_KEY + ".json.enc").then(function (verify) {
+          return decryptWithKey(key, withCacheBust(BASE + "static-api/" + VERIFY_KEY + ".json.enc")).then(function (verify) {
             if (!verify || verify.ok !== true) throw new Error("密码不正确");
             finishUnlock(key, document.getElementById("asd-static-gate-remember").checked);
           });
