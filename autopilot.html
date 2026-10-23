@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>自动领航模拟盘</title>
+    <link rel="stylesheet" href="styles.css?v=20261018b" />
+    <meta name="robots" content="noindex,nofollow" />
+    <script src="static-api-shim.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-line">
+          <h1>自动领航模拟盘</h1>
+          <span id="ap-status" class="status-dot is-loading" role="status">连接中</span>
+          <span id="ap-phase" class="quiet-tag">--</span>
+        </div>
+        <div class="topbar-actions">
+          <span id="ap-freshness" class="muted">--</span>
+          <a class="plain-button nav-link" href="./" title="返回持仓行情主页">← 持仓行情</a>
+          <button id="ap-refresh" class="plain-button" type="button">刷新</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="panel" aria-labelledby="ap-summary-heading">
+          <div class="section-heading">
+            <h2 id="ap-summary-heading">模拟账户摘要 <span id="ap-base-note" class="count-label">--</span></h2>
+            <span id="ap-decision-window" class="muted">决策窗口 --</span>
+          </div>
+          <div id="ap-summary-grid" class="summary-grid autopilot-summary-grid">
+            <div class="summary-item"><span>模拟总权益</span><strong id="ap-total">--</strong></div>
+            <div class="summary-item"><span>模拟累计收益</span><strong id="ap-return">--</strong></div>
+            <div class="summary-item"><span>同期实盘（持仓市值）</span><strong id="ap-real-return">--</strong></div>
+            <div class="summary-item"><span>超额（模拟−实盘）</span><strong id="ap-excess">--</strong></div>
+            <div class="summary-item"><span>股票仓位</span><strong id="ap-exposure">--</strong></div>
+            <div class="summary-item"><span>现金</span><strong id="ap-cash">--</strong></div>
+            <div class="summary-item"><span>已实现盈亏</span><strong id="ap-realized">--</strong></div>
+            <div class="summary-item"><span>操作 / 费用</span><strong id="ap-trades">--</strong></div>
+          </div>
+          <p class="summary-note">模拟账户在首个交易日自动镜像实盘持仓与净现金（现金−负债），此后完全按规则独立决策；仅价格随行情更新，不连接券商。估算数据，非投资建议。</p>
+        </section>
+
+        <section class="panel" aria-labelledby="ap-nav-heading">
+          <div class="section-heading">
+            <h2 id="ap-nav-heading">净值对比：自动模拟 vs 实盘（人工）</h2>
+            <span id="ap-nav-meta" class="muted">--</span>
+          </div>
+          <div id="ap-nav-chart" class="autopilot-nav-chart" role="img" aria-label="自动模拟盘与实盘净值对比曲线"></div>
+          <p class="summary-note">三条线同起点归一（基点 1000）：模拟净值 = 模拟账户总权益；实盘持仓市值 = 当前真实持仓的市值变动（含人工操作影响）；个人指数 = 8/25 快照篮子的前复权口径（长期参照）。</p>
+        </section>
+
+        <section class="panel" aria-labelledby="ap-decision-heading">
+          <div class="section-heading">
+            <div class="insight-title-line">
+              <h2 id="ap-decision-heading">最近一次自动决策</h2>
+              <span id="ap-regime-badge" class="decision-badge is-pending">--</span>
+            </div>
+            <span id="ap-decision-meta" class="muted">--</span>
+          </div>
+          <div class="table-wrap">
+            <table class="positions-table autopilot-table">
+              <thead>
+                <tr>
+                  <th scope="col">代码 / 名称</th>
+                  <th scope="col">流派票数</th>
+                  <th scope="col">流派状态</th>
+                  <th scope="col" class="numeric">当前权重</th>
+                  <th scope="col" class="numeric">目标权重</th>
+                  <th scope="col">决策说明</th>
+                </tr>
+              </thead>
+              <tbody id="ap-plans-body">
+                <tr><td colspan="6" class="empty">等待首次决策</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p id="ap-decision-note" class="summary-note"></p>
+        </section>
+
+        <section class="panel" aria-labelledby="ap-positions-heading">
+          <div class="section-heading">
+            <h2 id="ap-positions-heading">持仓对照：模拟 vs 实盘</h2>
+            <span class="muted">差异列 = 模拟股数 − 实盘股数</span>
+          </div>
+          <div class="table-wrap">
+            <table class="positions-table autopilot-table">
+              <thead>
+                <tr>
+                  <th scope="col">代码 / 名称</th>
+                  <th scope="col" class="numeric">模拟股数</th>
+                  <th scope="col" class="numeric">实盘股数</th>
+                  <th scope="col" class="numeric">差异</th>
+                  <th scope="col" class="numeric">现价</th>
+                  <th scope="col" class="numeric">模拟市值</th>
+                  <th scope="col" class="numeric">模拟权重</th>
+                  <th scope="col" class="numeric">基准权重</th>
+                  <th scope="col" class="numeric">浮动盈亏</th>
+                </tr>
+              </thead>
+              <tbody id="ap-positions-body">
+                <tr><td colspan="9" class="empty">正在获取模拟持仓…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="ap-journal-heading">
+          <div class="section-heading">
+            <h2 id="ap-journal-heading">自动化操作记录 <span id="ap-journal-count" class="count-label">--</span></h2>
+            <span class="muted">全程留痕 · 最新在前</span>
+          </div>
+          <div class="table-wrap">
+            <table class="positions-table autopilot-table">
+              <thead>
+                <tr>
+                  <th scope="col">时间</th>
+                  <th scope="col">类型</th>
+                  <th scope="col">标的</th>
+                  <th scope="col">动作</th>
+                  <th scope="col" class="numeric">数量</th>
+                  <th scope="col" class="numeric">价格</th>
+                  <th scope="col" class="numeric">金额</th>
+                  <th scope="col" class="numeric">费用</th>
+                  <th scope="col">理由 / 内容</th>
+                </tr>
+              </thead>
+              <tbody id="ap-journal-body">
+                <tr><td colspan="9" class="empty">暂无自动化操作记录</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="ap-rules-heading">
+          <div class="section-heading">
+            <h2 id="ap-rules-heading">决策规则（透明可复核）</h2>
+          </div>
+          <ul id="ap-rules-list" class="insight-list autopilot-rules"></ul>
+          <p class="summary-note">本系统只写本地模拟台账（data/autopilot/），绝不触碰真实账户；其表现用于与人工操作对照复盘，不构成投资建议。</p>
+        </section>
+      </main>
+
+      <footer>
+        <span>自动领航模拟盘 · 每 30 秒自动刷新</span>
+        <span>仅供研究复盘，不构成投资建议</span>
+      </footer>
+    </div>
+
+    <noscript>此页面需要启用 JavaScript。</noscript>
+    <script src="vendor/echarts.min.js" defer></script>
+    <script src="autopilot.js?v=20261018a" defer></script>
+  </body>
+</html>
