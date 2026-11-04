@@ -55,6 +55,7 @@ try:
     from scripts.hithink_quote_provider import HithinkQuoteProvider
     from scripts import intraday_pnl_backfill as intraday_backfill_module
     from scripts import agg_t_signal as agg_t_signal_module
+    from scripts import holding_fundamentals as holding_fundamentals_module
     from scripts.intraday_pnl_timeseries import (
         IntradayPnlError,
         IntradayPnlStore,
@@ -86,6 +87,7 @@ try:
     from scripts import auto_pilot as auto_pilot_module
     from scripts import options_sentiment as options_sentiment_module
     from scripts import derivatives_regime as derivatives_regime_module
+    from scripts import overnight_correlation as overnight_correlation_module
 except ModuleNotFoundError:  # Direct execution: python scripts/dashboard_server.py
     # 直接执行时 sys.path[0] 是 scripts/，而 daily_pnl_history 等模块内部使用
     # `from scripts.xxx import …` 的包式导入；把仓库根目录注入 sys.path，
@@ -108,6 +110,7 @@ except ModuleNotFoundError:  # Direct execution: python scripts/dashboard_server
     from hithink_quote_provider import HithinkQuoteProvider  # type: ignore[no-redef]
     import intraday_pnl_backfill as intraday_backfill_module  # type: ignore[no-redef]
     import agg_t_signal as agg_t_signal_module  # type: ignore[no-redef]
+    import holding_fundamentals as holding_fundamentals_module  # type: ignore[no-redef]
     from intraday_pnl_timeseries import (  # type: ignore[no-redef]
         IntradayPnlError,
         IntradayPnlStore,
@@ -139,6 +142,7 @@ except ModuleNotFoundError:  # Direct execution: python scripts/dashboard_server
     import auto_pilot as auto_pilot_module  # type: ignore[no-redef]
     import options_sentiment as options_sentiment_module  # type: ignore[no-redef]
     import derivatives_regime as derivatives_regime_module  # type: ignore[no-redef]
+    import overnight_correlation as overnight_correlation_module  # type: ignore[no-redef]
 try:
     from scripts import nextday_model as nextday_model_module
     from scripts import nextday_backtest as nextday_backtest_module
@@ -364,6 +368,7 @@ TENCENT_GLOBALS = [
     ("usKLAC", "科磊"),
     ("usARM", "Arm"),
     ("usMRVL", "迈威尔科技"),
+    ("usPYPL", "PayPal"),
     ("usWDC", "西部数据"),
     ("usSTX", "希捷科技"),
     ("usSNDK", "闪迪"),
@@ -454,8 +459,11 @@ def _data_source_chains_snapshot() -> dict[str, Any]:
 # 外加商品组：原油/黄金自全球参考并入，COMEX铜为 AI 电网/算力强相关金属）。
 # symbol 统一用 b_ 前缀并入 INDEX_CHART_INSTRUMENTS 白名单；
 # 东财 ulist 批量行情一次请求取全部（105=纳斯达克，106=纽交所，153=OTC，
-# 101=COMEX，100=全球指数）；SK海力士东财不覆盖韩国个股，行情与日K走 Naver。
+# 177=韩股，101=COMEX，100=全球指数）；美股/韩股个股另有新浪备源
+# （东财 push2his 对美股 secid 直连会被连接级封禁）。
 # SpaceX 未上市无行情代码，纳斯达克中国金龙指数(HXC)东财亦无行情，均不入列。
+# 2026-10-23：百度已移出隔夜清单——其展示位换成三星电子（存储链，与持仓相关度
+# 更高，见 dashboard/app.js OVERNIGHT_PORTFOLIO_CORRELATION），百度不再拉行情。
 EM_OVERNIGHT_INSTRUMENTS: list[dict[str, Any]] = [
     {"symbol": "b_FTSE", "name": "英国富时100", "em_secid": "100.FTSE", "group": "欧股指数", "global": True},
     {"symbol": "b_GDAXI", "name": "德国DAX", "em_secid": "100.GDAXI", "group": "欧股指数", "global": True},
@@ -464,20 +472,69 @@ EM_OVERNIGHT_INSTRUMENTS: list[dict[str, Any]] = [
     {"symbol": "b_GC", "name": "纽约黄金", "em_secid": "101.GC00Y", "group": "商品"},
     {"symbol": "b_SI", "name": "COMEX白银", "em_secid": "101.SI00Y", "group": "商品"},
     {"symbol": "b_HG", "name": "COMEX铜", "em_secid": "101.HG00Y", "group": "商品"},
-    {"symbol": "b_MSFT", "name": "微软", "em_secid": "105.MSFT", "group": "美股科技"},
-    {"symbol": "b_META", "name": "Meta", "em_secid": "105.META", "group": "美股科技"},
-    {"symbol": "b_NVDA", "name": "英伟达", "em_secid": "105.NVDA", "group": "美股科技"},
-    {"symbol": "b_GOOGL", "name": "谷歌-A", "em_secid": "105.GOOGL", "group": "美股科技"},
+    {"symbol": "b_MSFT", "name": "微软", "em_secid": "105.MSFT", "tencent_symbol": "usMSFT", "chart_kind": "tencent_us", "chart_symbol": "usMSFT", "group": "美股科技", "featured": True, "ai_core": True},
+    {"symbol": "b_META", "name": "Meta", "em_secid": "105.META", "group": "美股科技", "tencent_symbol": "usMETA", "chart_kind": "tencent_us", "chart_symbol": "usMETA", "featured": True, "ai_core": True},
+    {"symbol": "b_GOOGL", "name": "谷歌-A", "em_secid": "105.GOOGL", "group": "美股科技", "tencent_symbol": "usGOOGL", "chart_kind": "tencent_us", "chart_symbol": "usGOOGL", "featured": True, "ai_core": True},
     {"symbol": "b_AAPL", "name": "苹果", "em_secid": "105.AAPL", "group": "美股科技"},
-    {"symbol": "b_AMZN", "name": "亚马逊", "em_secid": "105.AMZN", "group": "美股科技"},
+    {"symbol": "b_AMZN", "name": "亚马逊", "em_secid": "105.AMZN", "group": "美股科技", "tencent_symbol": "usAMZN", "chart_kind": "tencent_us", "chart_symbol": "usAMZN", "featured": True, "ai_core": True},
     {"symbol": "b_TSLA", "name": "特斯拉", "em_secid": "105.TSLA", "group": "美股科技"},
-    {"symbol": "b_SNDK", "name": "闪迪", "em_secid": "105.SNDK", "group": "存储链"},
-    {"symbol": "b_STX", "name": "希捷科技", "em_secid": "105.STX", "group": "存储链"},
-    {"symbol": "b_WDC", "name": "西部数据", "em_secid": "105.WDC", "group": "存储链"},
-    {"symbol": "b_MU", "name": "美光科技", "em_secid": "105.MU", "group": "存储链"},
-    {"symbol": "b_SKHYNIX", "name": "SK海力士", "naver_symbol": "000660", "group": "存储链", "global": True},
-    {"symbol": "b_SAMSUNG", "name": "三星电子", "naver_symbol": "005930", "group": "存储链", "global": True},
-    {"symbol": "b_TWII", "name": "台湾加权", "em_secid": "100.TWII", "group": "全球指数", "global": True},
+    # PayPal：2026-10-28 新增。走腾讯美股批量行情 + usfqkline 日K/分时，
+    # 不配置东财 secid（东财美股 secid 间歇性空响应）。featured=True 使其
+    # 不受持仓相关度阈值隐藏；ai_core 标记与「美股科技/金融」组用于高亮。
+    {"symbol": "b_PYPL", "name": "PayPal", "tencent_symbol": "usPYPL", "chart_kind": "tencent_us", "chart_symbol": "usPYPL", "group": "美股科技/金融", "featured": True, "from_global_symbol": "usPYPL"},
+    # 存储/半导体/芯片：featured=True 的标的不受持仓相关度阈值隐藏；它们在
+    # 「全球参考」中的同名 us* 行情由 OVERNIGHT_SUPERSEDED_GLOBAL_SYMBOLS 去除，
+    # 保证同一证券只出现在一个模块。新增标的走腾讯美股报价与 usfqkline 图表，
+    # 避免东财美股 secid 间歇性空响应影响主展示。
+    {"symbol": "b_SNDK", "name": "闪迪", "em_secid": "105.SNDK", "tencent_symbol": "usSNDK", "group": "存储链", "featured": True, "from_global_symbol": "usSNDK"},
+    {"symbol": "b_STX", "name": "希捷科技", "em_secid": "105.STX", "tencent_symbol": "usSTX", "group": "存储链", "featured": True, "from_global_symbol": "usSTX"},
+    {"symbol": "b_WDC", "name": "西部数据", "em_secid": "105.WDC", "tencent_symbol": "usWDC", "group": "存储链", "featured": True, "from_global_symbol": "usWDC"},
+    {"symbol": "b_MU", "name": "美光科技", "em_secid": "105.MU", "tencent_symbol": "usMU", "group": "存储链", "featured": True, "from_global_symbol": "usMU"},
+    {"symbol": "b_NVDA", "name": "英伟达", "em_secid": "105.NVDA", "tencent_symbol": "usNVDA", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usNVDA"},
+    {"symbol": "b_TSM", "name": "台积电", "tencent_symbol": "usTSM", "chart_kind": "tencent_us", "chart_symbol": "usTSM", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usTSM"},
+    {"symbol": "b_ASML", "name": "阿斯麦", "tencent_symbol": "usASML", "chart_kind": "tencent_us", "chart_symbol": "usASML", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usASML"},
+    {"symbol": "b_AMD", "name": "超威半导体", "tencent_symbol": "usAMD", "chart_kind": "tencent_us", "chart_symbol": "usAMD", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usAMD"},
+    {"symbol": "b_AVGO", "name": "博通", "tencent_symbol": "usAVGO", "chart_kind": "tencent_us", "chart_symbol": "usAVGO", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usAVGO"},
+    {"symbol": "b_QCOM", "name": "高通", "tencent_symbol": "usQCOM", "chart_kind": "tencent_us", "chart_symbol": "usQCOM", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usQCOM"},
+    {"symbol": "b_INTC", "name": "英特尔", "tencent_symbol": "usINTC", "chart_kind": "tencent_us", "chart_symbol": "usINTC", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usINTC"},
+    {"symbol": "b_AMAT", "name": "应用材料", "tencent_symbol": "usAMAT", "chart_kind": "tencent_us", "chart_symbol": "usAMAT", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usAMAT"},
+    {"symbol": "b_LRCX", "name": "拉姆研究", "tencent_symbol": "usLRCX", "chart_kind": "tencent_us", "chart_symbol": "usLRCX", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usLRCX"},
+    {"symbol": "b_KLAC", "name": "科磊", "tencent_symbol": "usKLAC", "chart_kind": "tencent_us", "chart_symbol": "usKLAC", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usKLAC"},
+    {"symbol": "b_ARM", "name": "Arm", "tencent_symbol": "usARM", "chart_kind": "tencent_us", "chart_symbol": "usARM", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usARM"},
+    {"symbol": "b_MRVL", "name": "迈威尔科技", "tencent_symbol": "usMRVL", "chart_kind": "tencent_us", "chart_symbol": "usMRVL", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usMRVL"},
+    {"symbol": "b_SOXX", "name": "费城半导体ETF", "tencent_symbol": "usSOXX", "chart_kind": "tencent_us", "chart_symbol": "usSOXX", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usSOXX"},
+    {"symbol": "b_SMH", "name": "半导体ETF", "tencent_symbol": "usSMH", "chart_kind": "tencent_us", "chart_symbol": "usSMH", "group": "半导体/芯片", "featured": True, "from_global_symbol": "usSMH"},
+    # 韩股走东财 177.*（Naver 在国内常连不上，仅作备源）：东财韩股 secid 由
+    # 搜索接口确认（SK海力士 177.000660、三星电子 177.005930），ulist 批量与
+    # push2his 日K、trends2 分时都实测可用，且带当日实时 bar。
+    {"symbol": "b_SKHYNIX", "name": "SK海力士", "em_secid": "177.000660", "naver_symbol": "000660", "group": "存储链", "featured": True},
+    {"symbol": "b_SAMSUNG", "name": "三星电子", "em_secid": "177.005930", "naver_symbol": "005930", "group": "存储链", "featured": True},
+    {"symbol": "b_KOSPI", "name": "韩国KOSPI", "em_secid": "100.KS11", "naver_symbol": "KOSPI", "group": "半导体/芯片指数", "featured": True, "from_global_symbol": "b_KOSPI"},
+    {"symbol": "b_TWII", "name": "台湾加权", "em_secid": "100.TWII", "group": "半导体/芯片指数", "featured": True},
+    # 全球参考里的股票指数/指数 ETF 全部并入隔夜模块，避免同一个指数占两块。
+    # 期货、美元指数、汇率和美债仍留在全球参考作为宏观指标。
+    {"symbol": "b_NKY", "name": "日经225", "sina_symbol": "b_NKY", "chart_kind": "eastmoney", "chart_secid": "100.N225", "group": "全球指数", "featured": True, "from_global_symbol": "b_NKY", "unit": "点"},
+    {"symbol": "b_HSI", "name": "恒生指数", "tencent_symbol": "hkHSI", "chart_kind": "tencent_hk", "chart_symbol": "hkHSI", "group": "全球指数", "featured": True, "from_global_symbol": "hkHSI", "unit": "点"},
+    {"symbol": "b_HSTECH", "name": "恒生科技", "tencent_symbol": "hkHSTECH", "chart_kind": "tencent_hk", "chart_symbol": "hkHSTECH", "group": "全球指数", "featured": True, "from_global_symbol": "hkHSTECH", "unit": "点"},
+    {"symbol": "b_INX", "name": "标普500", "tencent_symbol": "usINX", "chart_kind": "tencent_us", "chart_symbol": "usINX", "group": "全球指数", "featured": True, "from_global_symbol": "usINX", "unit": "点"},
+    {"symbol": "b_IXIC", "name": "纳斯达克", "tencent_symbol": "usIXIC", "chart_kind": "tencent_us", "chart_symbol": "usIXIC", "group": "全球指数", "featured": True, "from_global_symbol": "usIXIC", "unit": "点"},
+    {"symbol": "b_NDX", "name": "纳斯达克100", "tencent_symbol": "usNDX", "chart_kind": "tencent_us", "chart_symbol": "usNDX", "group": "全球指数", "featured": True, "from_global_symbol": "usNDX", "unit": "点"},
+    {"symbol": "b_DJI", "name": "道琼斯", "tencent_symbol": "usDJI", "chart_kind": "tencent_us", "chart_symbol": "usDJI", "group": "全球指数", "featured": True, "from_global_symbol": "usDJI", "unit": "点"},
+    {"symbol": "b_IWM", "name": "罗素2000ETF", "tencent_symbol": "usIWM", "chart_kind": "tencent_us", "chart_symbol": "usIWM", "group": "全球指数", "featured": True, "from_global_symbol": "usIWM", "unit": "美元"},
+    {"symbol": "b_VIXY", "name": "VIX短期期货ETF", "tencent_symbol": "usVIXY", "chart_kind": "tencent_us", "chart_symbol": "usVIXY", "group": "全球指数", "featured": True, "from_global_symbol": "usVIXY", "unit": "美元"},
+    # 台湾本地半导体代表性个股：晶圆代工、IC设计、封测、存储与ASIC。
+    {"symbol": "b_TW2330", "name": "台积电(台股)", "em_secid": "178.2330", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW2454", "name": "联发科", "em_secid": "178.2454", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW3711", "name": "日月光投控", "em_secid": "178.3711", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW2303", "name": "联电", "em_secid": "178.2303", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW2379", "name": "瑞昱", "em_secid": "178.2379", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW3034", "name": "联咏", "em_secid": "178.3034", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW2408", "name": "南亚科", "em_secid": "178.2408", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW2344", "name": "华邦电", "em_secid": "178.2344", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW5347", "name": "世界先进", "em_secid": "178.5347", "twse_market": "otc", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW6770", "name": "力积电", "em_secid": "178.6770", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW2449", "name": "京元电子", "em_secid": "178.2449", "group": "台湾半导体", "featured": True},
+    {"symbol": "b_TW3661", "name": "世芯-KY", "em_secid": "178.3661", "group": "台湾半导体", "featured": True},
     {"symbol": "b_RKLB", "name": "Rocket Lab", "em_secid": "105.RKLB", "group": "太空概念"},
     {"symbol": "b_LUNR", "name": "Intuitive Machines", "em_secid": "105.LUNR", "group": "太空概念"},
     {"symbol": "b_ASTS", "name": "AST SpaceMobile", "em_secid": "105.ASTS", "group": "太空概念"},
@@ -494,9 +551,87 @@ EM_OVERNIGHT_INSTRUMENTS: list[dict[str, Any]] = [
     {"symbol": "b_TCOM", "name": "携程", "em_secid": "105.TCOM", "group": "中概股"},
     {"symbol": "b_TCEHY", "name": "腾讯(ADR)", "em_secid": "153.TCEHY", "group": "中概股"},
     {"symbol": "b_NTES", "name": "网易", "em_secid": "105.NTES", "group": "中概股"},
-    {"symbol": "b_BIDU", "name": "百度", "em_secid": "105.BIDU", "group": "中概股"},
     {"symbol": "b_BILI", "name": "哔哩哔哩", "em_secid": "105.BILI", "group": "中概股"},
 ]
+
+# 隔夜模块接管的全球参考证券（usNVDA → b_NVDA 等）。服务端在组装 global
+# 列表时按同一交易代码剔除，避免同一股票/ETF 同时出现在两块；前端仍保留
+# 名称/代码二次去重，兼容旧缓存载荷。
+OVERNIGHT_SUPERSEDED_GLOBAL_SYMBOLS = frozenset(
+    str(item.get("from_global_symbol") or "").lower()
+    for item in EM_OVERNIGHT_INSTRUMENTS
+    if item.get("from_global_symbol")
+)
+OVERNIGHT_FEATURED_SYMBOLS = frozenset(
+    str(item.get("symbol") or "")
+    for item in EM_OVERNIGHT_INSTRUMENTS
+    if item.get("featured")
+)
+
+# AI / 存储核心：面板用与「与持仓高相关」相同的 ★ 高亮样式。来源有二：
+# 分组本身即 AI/存储（存储链、半导体、台股半导体），或条目上显式 ai_core
+# 标记（云计算/大模型侧的微软、Meta、谷歌、亚马逊）。
+# 不按名称关键词判断——名称随数据源变化，分组与标记是配置事实。
+# 苹果/特斯拉/中概/商品/PayPal 不在此列：它们展示但不加 ★。
+AI_CORE_OVERNIGHT_GROUPS = frozenset({
+    "存储链",
+    "半导体/芯片",
+    "半导体/芯片指数",
+    "台湾半导体",
+})
+AI_CORE_OVERNIGHT_SYMBOLS = frozenset(
+    str(item.get("symbol") or "")
+    for item in EM_OVERNIGHT_INSTRUMENTS
+    if item.get("ai_core") or str(item.get("group") or "") in AI_CORE_OVERNIGHT_GROUPS
+)
+
+
+def _overnight_chart_instrument(item: dict[str, Any]) -> dict[str, str]:
+    """Build the chart whitelist entry without assuming EastMoney is the source."""
+
+    if item.get("chart_kind"):
+        entry = {"name": str(item["name"]), "kind": str(item["chart_kind"])}
+        chart_symbol = str(item.get("chart_symbol") or item.get("tencent_symbol") or "")
+        if chart_symbol:
+            entry["symbol"] = chart_symbol
+        chart_secid = str(item.get("chart_secid") or "")
+        if chart_secid:
+            entry["secid"] = chart_secid
+        chart_stock_code = str(item.get("chart_stock_code") or "")
+        if chart_stock_code:
+            entry["stock_code"] = chart_stock_code
+        return entry
+    secid = str(item.get("em_secid") or "")
+    if secid.startswith("178.") or str(item.get("symbol")) == "b_TWII":
+        return {
+            "name": str(item["name"]),
+            "kind": "tw_stock",
+            "secid": secid,
+            "stock_code": "TAIEX"
+            if str(item.get("symbol")) == "b_TWII"
+            else secid.split(".", 1)[1],
+        }
+    if item.get("em_secid"):
+        return {
+            "name": str(item["name"]),
+            "kind": "eastmoney",
+            "secid": str(item["em_secid"]),
+            **(
+                {"naver_symbol": str(item["naver_symbol"])}
+                if item.get("naver_symbol")
+                else {}
+            ),
+        }
+    return {
+        "name": str(item["name"]),
+        "kind": "naver",
+        **(
+            {"naver_symbol": str(item["naver_symbol"])}
+            if item.get("naver_symbol")
+            else {}
+        ),
+    }
+
 
 # 主要市场/全球参考卡片上可展示K线与分时图的指数白名单。与持仓股票一样按
 # 显式白名单放行，避免本地服务被当作任意代码的行情代理。数据源逐一实测：
@@ -538,16 +673,12 @@ INDEX_CHART_LOOKUP: dict[str, str] = {
     key.lower(): key for key in INDEX_CHART_INSTRUMENTS
 }
 
-# 隔夜全球标的全部可出图：东财 secid 走 push2his 日K + trends2 分时；
-# SK海力士走 Naver 日K（无分时源，弹层分时面板显示空态）。
+# 隔夜全球标的全部可出图：有东财 secid 的走 push2his 日K + trends2 分时
+# （韩股 177.* 实测可用，带当日实时 bar）；只剩 naver_symbol 的（东财不覆盖
+# 的品种）走 Naver 日K（无分时源，弹层分时面板显示空态）。
 INDEX_CHART_INSTRUMENTS.update(
     {
-        item["symbol"]: {
-            "name": item["name"],
-            "kind": "naver" if item.get("naver_symbol") else "eastmoney",
-            **({"secid": item["em_secid"]} if item.get("em_secid") else {}),
-            **({"naver_symbol": item["naver_symbol"]} if item.get("naver_symbol") else {}),
-        }
+        item["symbol"]: _overnight_chart_instrument(item)
         for item in EM_OVERNIGHT_INSTRUMENTS
     }
 )
@@ -555,6 +686,29 @@ INDEX_CHART_INSTRUMENTS.update(
 INDEX_CHART_LOOKUP: dict[str, str] = {
     key.lower(): key for key in INDEX_CHART_INSTRUMENTS
 }
+
+# 「宽基ETF监控」面板（2026-11-03 新增，占据原「全球参考」英国/德法位置）：
+# 四只核心宽基ETF的实时行情 + 当日分时（带量），重点关注成交量变化
+# （当日累计量 vs 昨日全天量）。行情走腾讯批量 quote（与持仓同一口径），
+# 分时走腾讯 5 分钟K线（东财 trends2 备援，与 A 股持仓一致），
+# 昨日量取自日K最后一根已完成交易日 bar。白名单固定，不做任意代码代理。
+ETF_BROAD_MONITOR_INSTRUMENTS: list[dict[str, str]] = [
+    {"symbol": "sh510300", "thscode": "510300.SH", "name": "沪深300ETF华泰柏瑞"},
+    {"symbol": "sh510050", "thscode": "510050.SH", "name": "上证50ETF华夏"},
+    {"symbol": "sh588000", "thscode": "588000.SH", "name": "科创50ETF华夏"},
+    {"symbol": "sz159915", "thscode": "159915.SZ", "name": "创业板ETF易方达"},
+]
+ETF_BROAD_MONITOR_TTL_SECONDS = 20.0
+# 日K（昨日量）变化很慢，半小时刷一次即可；分时/行情 20s 跟随面板轮询。
+ETF_BROAD_MONITOR_DAILY_TTL_SECONDS = 1800.0
+ETF_BROAD_MONITOR_FAIL_BACKOFF_SECONDS = 30.0
+_ETF_BROAD_MONITOR_PAYLOAD_CACHE: dict[str, Any] = {
+    "payload": None,
+    "monotonic": 0.0,
+    "failed_monotonic": None,
+}
+_ETF_BROAD_MONITOR_ENTRY_CACHE: dict[str, dict[str, Any]] = {}
+_ETF_BROAD_MONITOR_LOCK = threading.Lock()
 
 MATERIAL_TERMS: dict[str, tuple[str, ...]] = {
     "业绩": ("业绩", "年报", "中报", "季报", "净利润", "营业收入", "预告", "快报"),
@@ -689,6 +843,8 @@ MAINTENANCE_STATE: dict[str, dict[str, Any]] = {
         "forward_validation",
         "tomorrow_plans",
         "index_charts",
+        "overnight",
+        "overnight_correlation",
     )
 }
 
@@ -724,8 +880,21 @@ POSITION_ADVICE_STATE: dict[str, Any] = {
 }
 
 STOCK_CHART_LOCK = threading.RLock()
-STOCK_CHART_BUILD_LOCK = threading.Lock()
+# 图表构建锁**按标的**分：全局锁会让后台预热把用户悬浮请求一起堵住（预热
+# 一个品种要拉全历史日K，串行下来几十秒，用户那边直接超时失败）。按标的分
+# 锁只防同一只票重复构建，不同品种可以并行。
+_STOCK_CHART_BUILD_LOCKS: dict[str, threading.Lock] = {}
+_STOCK_CHART_BUILD_LOCKS_GUARD = threading.Lock()
 STOCK_CHART_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _stock_chart_build_lock(thscode: str) -> threading.Lock:
+    with _STOCK_CHART_BUILD_LOCKS_GUARD:
+        lock = _STOCK_CHART_BUILD_LOCKS.get(thscode)
+        if lock is None:
+            lock = threading.Lock()
+            _STOCK_CHART_BUILD_LOCKS[thscode] = lock
+        return lock
 
 
 class EastmoneyCircuitOpen(RuntimeError):
@@ -863,6 +1032,8 @@ class BackgroundRefreshService:
         "index_charts",
         "paper_t",
         "autopilot",
+        "overnight",
+        "overnight_correlation",
     )
 
     def __init__(self) -> None:
@@ -889,6 +1060,12 @@ class BackgroundRefreshService:
             "index_charts": float(profile["index_charts_seconds"]),
             "paper_t": float(profile["quote_seconds"]),
             "autopilot": float(profile["quote_seconds"]),
+            # 隔夜行情有自己的会话感知节奏（隔夜市场开盘 5 分钟 / 全闭市 30
+            # 分钟），与 A 股行情的刷新开关无关。
+            "overnight": 300.0,
+            # 相关度是 180 个交易日的日收益相关，重算要拉全历史日K，很贵，
+            # 一天两次足够。
+            "overnight_correlation": 12 * 3600.0,
         }
 
     @staticmethod
@@ -907,6 +1084,8 @@ class BackgroundRefreshService:
             "index_charts": ensure_index_charts_refresh,
             "paper_t": auto_paper_module.run_all_strategies,
             "autopilot": auto_pilot_module.run_cycle,
+            "overnight": ensure_overnight_refresh,
+            "overnight_correlation": ensure_overnight_correlation_refresh,
         }
 
     def start(self, *, immediate: bool = False) -> bool:
@@ -924,7 +1103,16 @@ class BackgroundRefreshService:
             self._next_due = {
                 name: (
                     now_monotonic
-                    if immediate or name in {"data_retention", "tomorrow_plans", "index_charts"}
+                    if immediate
+                    or name in {
+                        "data_retention",
+                        "tomorrow_plans",
+                        "index_charts",
+                        # 隔夜行情与相关度都跟 A 股时段无关，服务起来就该是热的：
+                        # 隔夜行情决定"隔夜全球标的"的价格，相关度决定筛哪些标的。
+                        "overnight",
+                        "overnight_correlation",
+                    }
                     else now_monotonic + intervals[name]
                 )
                 for name in self._COMPONENTS
@@ -1454,21 +1642,27 @@ def ensure_tomorrow_plans_refresh(force: bool = False) -> bool:
 
 
 def ensure_index_charts_refresh(force: bool = False) -> bool:
-    """预热全部指数图表缓存。
+    """预热指数/全球参考图表缓存。
 
     每个品种按各自交易时段计算 TTL：预热一次后，非交易时段内重复调用
     全部命中内存缓存，不再向上游发起新的查询；临近开盘（TTL 覆盖到开盘
     前 5 分钟）自动恢复刷新，保证开盘即有可用的 K 线与分时。
+
+    「隔夜全球标的」那 30+ 只**不**进预热：它们的美股日K 一次要拉全历史
+    （新浪 ≈340KB/只），预热会把串行构建锁占满几分钟，用户此刻悬浮
+    反而等不到图。这批改为按需取（悬停时拉，几秒内返回）。
     """
 
     def build() -> None:
         failures: list[str] = []
-        for key in INDEX_CHART_INSTRUMENTS:
+        overnight_symbols = {str(item["symbol"]) for item in EM_OVERNIGHT_INSTRUMENTS}
+        warmed = [key for key in INDEX_CHART_INSTRUMENTS if key not in overnight_symbols]
+        for key in warmed:
             try:
                 get_stock_chart_payload(key)
             except Exception as exc:
                 failures.append(f"{key}:{type(exc).__name__}")
-        if len(failures) >= max(1, len(INDEX_CHART_INSTRUMENTS) // 2):
+        if failures and len(failures) >= max(1, len(warmed) // 2):
             raise RuntimeError("多数指数图表预热失败：" + "; ".join(failures[:6]))
 
     return _spawn_maintenance("index_charts", build)
@@ -1890,11 +2084,11 @@ class StockChartSymbolNotHeld(LookupError):
 def _resolve_portfolio_chart_instrument(raw_symbol: str) -> dict[str, Any]:
     """Resolve one canonical instrument for chart lookups.
 
-    Resolution accepts (in order): the market-index allowlist above, then any
-    configured holding.  The dashboard is a portfolio viewer, not an
-    unrestricted network proxy — a caller cannot make the local service fetch
-    arbitrary tickers.  A stock held by several portfolios resolves through the
-    same shared entry.
+    Resolution accepts (in order): the market-index allowlist above, any
+    configured holding, then the explicitly configured research watchlist.  The
+    dashboard is not an unrestricted network proxy — a caller cannot make the
+    local service fetch arbitrary tickers.  A stock held by several portfolios
+    resolves through the same shared entry.
     """
 
     candidate = str(raw_symbol or "").strip()
@@ -1903,11 +2097,13 @@ def _resolve_portfolio_chart_instrument(raw_symbol: str) -> dict[str, Any]:
         entry = INDEX_CHART_INSTRUMENTS[index_key]
         return {
             "thscode": index_key,
-            "symbol": index_key,
+            # 隔夜 b_* 是展示/白名单键；美股日K与分时需要真实 us* 腾讯代码。
+            "symbol": str(entry.get("symbol") or index_key),
             "name": str(entry.get("name") or index_key),
             "instrument_type": "index",
             "chart_kind": str(entry.get("kind") or "tencent"),
             "secid": str(entry.get("secid") or ""),
+            "stock_code": str(entry.get("stock_code") or ""),
             "sina_symbol": str(entry.get("sina_symbol") or ""),
             "naver_symbol": str(entry.get("naver_symbol") or ""),
         }
@@ -1922,7 +2118,18 @@ def _resolve_portfolio_chart_instrument(raw_symbol: str) -> dict[str, Any]:
                 "name": str(item.get("name") or thscode),
                 "instrument_type": str(item.get("instrument_type") or "stock"),
             }
-    raise StockChartSymbolNotHeld(f"{thscode} is not in any configured portfolio")
+    _, watchlist_items = _load_watchlist_items()
+    for item in watchlist_items:
+        if str(item.get("thscode") or "").upper() == thscode:
+            return {
+                "thscode": thscode,
+                "symbol": str(item["symbol"]),
+                "name": str(item.get("name") or thscode),
+                "instrument_type": str(item.get("instrument_type") or "stock"),
+            }
+    raise StockChartSymbolNotHeld(
+        f"{thscode} is not in any configured portfolio or the watchlist"
+    )
 
 
 def _canonical_daily_bar_time(value: Any) -> str | None:
@@ -2176,6 +2383,11 @@ def _merge_live_daily_bar(symbol: str, items: list[dict[str, Any]]) -> list[dict
     if len(stamp) != 8 or not stamp.isdigit():
         return items
     trade_date = f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}"
+    # 行情缓存跨午夜后仍可能保留昨日快照。若直接合成，会写出一根带「昨日盘中断面
+    # 成交量」的日线 bar，既不是完整日量、日期也已过去——宁可少一根也不放假数据。
+    today = _now().astimezone(CN_TZ).date().isoformat()
+    if trade_date != today:
+        return items
     if items and str(items[-1].get("time") or "") == trade_date:
         # 序列已含当日 bar（指数类由腾讯自带），保持腾讯原值不动。
         return items
@@ -2195,6 +2407,108 @@ def _merge_live_daily_bar(symbol: str, items: list[dict[str, Any]]) -> list[dict
             "time": trade_date,
             "open": open_,
             "close": close,
+            "high": high,
+            "low": low,
+            "volume": volume,
+        }
+    )
+    merged.sort(key=lambda item: str(item.get("time") or ""))
+    return merged
+
+
+def _overnight_quote_row(thscode: str, ticker: str = "") -> dict[str, Any] | None:
+    """按 symbol 或 ticker 找隔夜行情行（b_WDC 与 usWDC 是同一只票）。"""
+
+    with _EM_OVERNIGHT_LOCK:
+        rows = [dict(row) for row in (_EM_OVERNIGHT_CACHE["rows"] or [])]
+    key = str(thscode or "").strip()
+    for row in rows:
+        if str(row.get("symbol") or "") == key:
+            return row
+    if ticker:
+        suffix = f"_{ticker.upper()}"
+        for row in rows:
+            if str(row.get("symbol") or "").upper().endswith(suffix):
+                return row
+    return None
+
+
+def _overnight_trade_date(instrument: dict[str, Any], quote_time: str) -> str:
+    """隔夜行情的报价时间 → 该市场自己的交易日。
+
+    东财给的是北京时间戳：美股周五 16:00 EDT 收盘对应北京周六 04:00，
+    直接截日期会凭空多出一根"周六"的假 bar（比美股自己的交易日多一天）。
+    要按品种的交易所时区折回当地日期，才对得上日K 序列。Naver 给的本来就是
+    当地交易日（只有日期没有时分），直接用。
+    """
+
+    raw = str(quote_time or "").strip()
+    if len(raw) == 10:
+        return raw
+    thscode = str(instrument.get("thscode") or "")
+    session = GLOBAL_CHART_SESSIONS.get(thscode)
+    if session is None:
+        # 24×5 的商品市场按美东日期记账。
+        tz_name = "America/New_York" if thscode in GLOBAL_CHART_CONTINUOUS else "Asia/Shanghai"
+    else:
+        tz_name = str(session["tz"])
+    try:
+        observed = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw[:10]
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=CN_TZ)
+    return observed.astimezone(ZoneInfo(tz_name)).date().isoformat()
+
+
+def _merge_overnight_daily_bar(
+    instrument: dict[str, Any], items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """把隔夜行情的"当日 bar"并进日K序列（盘中实时）。
+
+    新浪美股日K 的当日 bar 只在收盘后补齐，盘中那根要么滞后一根、要么是
+    上一交易日；隔夜行情本身就是 5 分钟节奏刷新的现价，拿它合成当日 bar
+    最省——不必为了"当日 bar"反复重拉全历史日K（一次 300+KB）。这层补鲜
+    在**出参时**做，所以缓存里的日K 也能一直显示当前价。
+    """
+
+    if not items:
+        return items
+    thscode = str(instrument.get("thscode") or "")
+    ticker = _us_ticker_from_secid(instrument.get("secid"))
+    row = _overnight_quote_row(thscode, ticker)
+    if not row:
+        return items
+    price = _float(row.get("price"))
+    if price is None or price <= 0:
+        return items
+    trade_date = _overnight_trade_date(instrument, str(row.get("quote_time") or ""))
+    if len(trade_date) != 10:
+        return items
+    change = _float(row.get("change"))
+    high = _float(row.get("high"))
+    low = _float(row.get("low"))
+    open_ = _float(row.get("open"))
+    if open_ is None or open_ <= 0:
+        open_ = price - (change or 0.0)
+    if high is None or high <= 0:
+        high = price
+    if low is None or low <= 0:
+        low = price
+    existing = next(
+        (item for item in items if str(item.get("time") or "") == trade_date), None
+    )
+    # 历史序列里已有当日 bar 时保留它的成交量：新浪日K 的量与东财 ulist 的
+    # 量单位不同（股 vs 手），混用会把量柱画错。
+    volume = _float((existing or {}).get("volume")) or 0.0
+    if existing is None:
+        volume = _float(row.get("volume")) or 0.0
+    merged = [item for item in items if str(item.get("time") or "") != trade_date]
+    merged.append(
+        {
+            "time": trade_date,
+            "open": open_,
+            "close": price,
             "high": high,
             "low": low,
             "volume": volume,
@@ -2731,12 +3045,24 @@ for _overnight_item in EM_OVERNIGHT_INSTRUMENTS:
             "tz": "Asia/Seoul",
             "windows": ((daytime(9, 0), daytime(15, 30)),),
         }
-    elif _overnight_symbol == "b_TWII":
+    elif (
+        _overnight_symbol == "b_TWII"
+        or str(_overnight_item.get("em_secid") or "").split(".", 1)[0] == "178"
+    ):
         GLOBAL_CHART_SESSIONS[_overnight_symbol] = {
             "tz": "Asia/Taipei",
             "windows": ((daytime(9, 0), daytime(13, 30)),),
         }
-    elif str(_overnight_item.get("em_secid") or "").split(".", 1)[0] in {"105", "106", "153"}:
+    elif str(_overnight_item.get("tencent_symbol") or "").startswith("hk"):
+        GLOBAL_CHART_SESSIONS[_overnight_symbol] = {
+            "tz": "Asia/Hong_Kong",
+            "windows": ((daytime(9, 30), daytime(12, 0)), (daytime(13, 0), daytime(16, 10))),
+        }
+    elif (
+        _overnight_item.get("tencent_symbol")
+        or str(_overnight_item.get("em_secid") or "").split(".", 1)[0]
+        in {"105", "106", "153"}
+    ):
         GLOBAL_CHART_SESSIONS[_overnight_symbol] = {
             "tz": "America/New_York",
             "windows": ((daytime(9, 30), daytime(16, 10)),),
@@ -2877,6 +3203,8 @@ def _stock_chart_payload_from_entry(
     indicators: list[str] | None = None,
 ) -> dict[str, Any]:
     daily = copy.deepcopy(entry.get("daily") or {"items": [], "period": "day", "adjustment": "qfq"})
+    # 出参时补"当日 bar"：日K 历史按长 TTL 缓存，最后一根却始终是现价。
+    daily["items"] = _merge_overnight_daily_bar(instrument, daily.get("items") or [])
     intraday = copy.deepcopy(entry.get("intraday") or {"items": [], "period": "m5"})
     daily_age = max(0.0, now_monotonic - float(entry.get("daily_monotonic") or 0.0))
     intraday_age = max(0.0, now_monotonic - float(entry.get("intraday_monotonic") or 0.0))
@@ -3133,6 +3461,25 @@ def _sina_us_code(symbol: str) -> str:
     return raw[2:] if raw.lower().startswith("us") else raw
 
 
+# 东财 secid 的美股市场前缀：105=纳斯达克，106=纽交所，153=OTC（ADR）。
+_US_SECID_MARKETS = {"105", "106", "153"}
+
+
+def _us_ticker_from_secid(secid: str) -> str:
+    """美股 secid（105./106./153.）→ 新浪美股 ticker；非美股返回空串。
+
+    东财 push2his 对直连是连接级封禁（curl 直接 Empty reply），隔夜标的
+    里的美股/中概 ADR 全部走不通日K与分时；新浪美股接口是同一条已在
+    全球参考里验证过的备源，这里把 secid 翻译成它要的 ticker。
+    """
+
+    raw = str(secid or "").strip()
+    market, _, code = raw.partition(".")
+    if market not in _US_SECID_MARKETS or not code:
+        return ""
+    return code.upper()
+
+
 def _parse_sina_jsonp_rows(text: str) -> list[dict[str, Any]]:
     start = text.find("(")
     end = text.rfind(")")
@@ -3232,6 +3579,62 @@ def _fetch_sina_us_intraday_chart(
     }
 
 
+FINMIND_DATA_URL = "https://api.finmindtrade.com/api/v4/data"
+
+
+def _fetch_finmind_tw_daily_chart(
+    stock_code: str, count: int = STOCK_CHART_DAILY_COUNT
+) -> dict[str, Any]:
+    """Taiwan daily OHLC fallback (TWSE/TPEx) from FinMind's public dataset."""
+
+    start_date = (_now().date() - timedelta(days=max(420, int(count) * 2 + 100))).isoformat()
+    response = LIVE_SESSION.get(
+        FINMIND_DATA_URL,
+        params={
+            "dataset": "TaiwanStockPrice",
+            "data_id": str(stock_code),
+            "start_date": start_date,
+        },
+        headers={"User-Agent": UA},
+        timeout=(2.5, 15.0),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("status") != 200:
+        raise RuntimeError(f"FinMind error: {payload.get('msg') or payload.get('status')}")
+    bars: dict[str, dict[str, Any]] = {}
+    for row in payload.get("data") or []:
+        if not isinstance(row, dict):
+            continue
+        trade_date = _canonical_daily_bar_time(row.get("date"))
+        open_, close = _float(row.get("open")), _float(row.get("close"))
+        high, low = _float(row.get("max")), _float(row.get("min"))
+        if (
+            trade_date is None
+            or any(value is None or value <= 0 for value in (open_, close, high, low))
+            or high < max(open_, close)
+            or low > min(open_, close)
+        ):
+            continue
+        bars[trade_date] = {
+            "time": trade_date,
+            "open": open_,
+            "close": close,
+            "high": high,
+            "low": low,
+            "volume": _safe_round(_float(row.get("Trading_Volume")), 0),
+        }
+    items = [bars[key] for key in sorted(bars)][-max(1, int(count)) :]
+    if not items:
+        raise RuntimeError(f"FinMind returned no valid daily bars for {stock_code}")
+    return {
+        "adjustment": "none",
+        "period": "day",
+        "source": "FinMind台股日K(备援)",
+        "items": items,
+    }
+
+
 def _fetch_chart_daily(instrument: dict[str, Any]) -> dict[str, Any]:
     """Dispatch the daily chart fetch by instrument kind.
 
@@ -3247,15 +3650,31 @@ def _fetch_chart_daily(instrument: dict[str, Any]) -> dict[str, Any]:
             str(instrument.get("naver_symbol") or instrument["symbol"])
         )
     elif str(instrument.get("chart_kind") or "") == "eastmoney":
-        try:
-            daily = _fetch_eastmoney_daily_chart(instrument["secid"])
-        except Exception:
-            # 东财被 WAF 拦截等场景：白名单里配置了 naver_symbol 的指数
-            # （如 b_KOSPI）回落到 Naver 日K兜底；无兜底配置则照常报错。
-            naver_symbol = str(instrument.get("naver_symbol") or "")
-            if not naver_symbol:
-                raise
-            daily = _fetch_naver_daily_chart(naver_symbol)
+        ticker = _us_ticker_from_secid(instrument.get("secid"))
+        if ticker:
+            # 美股/中概 ADR（隔夜标的的主力）：东财 push2his 直连是连接级
+            # 封禁（curl 直接 Empty reply），每次先试东财纯属浪费一次超时；
+            # 新浪美股日K 是已在全球参考里验证过的备源，改成它优先，东财留作
+            # 新浪失效时的兜底。
+            try:
+                daily = _fetch_sina_us_daily_chart(ticker)
+                daily["adjustment"] = "none"
+                daily["source"] = "新浪财经美股日K"
+            except Exception as exc:
+                daily = _fetch_eastmoney_daily_chart(instrument["secid"])
+                _record_data_source_chain(
+                    "global_daily_kline", "backup", "东方财富日K", type(exc).__name__,
+                )
+        else:
+            try:
+                daily = _fetch_eastmoney_daily_chart(instrument["secid"])
+            except Exception:
+                # 东财被 WAF 拦截等场景：白名单里配置了 naver_symbol 的指数
+                # （如 b_KOSPI）回落到 Naver 日K兜底；无兜底配置则照常报错。
+                naver_symbol = str(instrument.get("naver_symbol") or "")
+                if not naver_symbol:
+                    raise
+                daily = _fetch_naver_daily_chart(naver_symbol)
     elif str(instrument.get("chart_kind") or "") == "sina_futures":
         daily = _fetch_sina_global_futures_daily_chart(str(instrument["sina_symbol"]))
     elif str(instrument.get("chart_kind") or "") == "tencent_us":
@@ -3268,6 +3687,16 @@ def _fetch_chart_daily(instrument: dict[str, Any]) -> dict[str, Any]:
                     daily = sina_daily
             except Exception:
                 pass
+    elif str(instrument.get("chart_kind") or "") == "tw_stock":
+        try:
+            daily = _fetch_eastmoney_daily_chart(str(instrument.get("secid") or ""))
+        except Exception:
+            daily = _fetch_finmind_tw_daily_chart(
+                str(instrument.get("stock_code") or instrument["symbol"])
+            )
+            _record_data_source_chain(
+                "global_daily_kline", "backup", "FinMind台股日K", "EastmoneyUnavailable"
+            )
     else:
         # A股个股/指数日K主备线：腾讯 newfqkline 三主机 → 东财 push2his(fqt=1)。
         daily = _fetch_cn_stock_daily_chart(instrument["symbol"])
@@ -3286,10 +3715,35 @@ def _fetch_chart_intraday(
             str(instrument.get("naver_symbol") or instrument["symbol"]),
             fallback_date=fallback_date,
         )
+    if kind == "tw_stock":
+        raise RuntimeError("台股分时暂无公开备源")
     if kind == "eastmoney":
-        return _fetch_eastmoney_intraday_chart(
-            instrument["secid"], fallback_date=fallback_date
-        )
+        ticker = _us_ticker_from_secid(instrument.get("secid"))
+        if ticker:
+            # 美股/中概 ADR：东财 5 分钟 K 走 push2his，直连被封；新浪美股
+            # 5 分钟线优先（与全球参考里的 us* 品种同一条备源），东财兜底。
+            try:
+                chart = _fetch_sina_us_intraday_chart(ticker, fallback_date=fallback_date)
+            except Exception as exc:
+                chart = _fetch_eastmoney_intraday_chart(
+                    instrument["secid"], fallback_date=fallback_date
+                )
+                _record_data_source_chain(
+                    "global_intraday", "backup", "东方财富5分钟K线", type(exc).__name__,
+                )
+            return chart
+        try:
+            chart = _fetch_eastmoney_intraday_chart(
+                instrument["secid"], fallback_date=fallback_date
+            )
+        except Exception:
+            # 东财分时不可用时回落到 Naver（韩股 177.* 的备源；Naver 无逐分钟
+            # OHLC，会用收盘价合成线型 bar）。
+            naver_symbol = str(instrument.get("naver_symbol") or "")
+            if not naver_symbol:
+                raise
+            chart = _fetch_naver_intraday_chart(naver_symbol, fallback_date=fallback_date)
+        return chart
     if kind == "sina_futures":
         raise RuntimeError("新浪全球期货无分时数据源")
     if kind in {"tencent_hk", "tencent_us"}:
@@ -3336,6 +3790,9 @@ def get_stock_chart_payload(
 
     def _ttls(now: float) -> tuple[float, float]:
         intraday_ttl = _chart_ttl_for_instrument(instrument)
+        # 日K 的最后一根由隔夜行情实时补鲜（见 _merge_overnight_daily_bar），
+        # 不需要为了"当日 bar"反复重拉全历史日K（新浪美股日K 一次 300+KB，
+        # 30 个标的按 5 分钟刷新等于 100MB/小时），6 小时刷一次历史即可。
         daily_ttl = intraday_ttl if intraday_ttl > 900.0 else STOCK_CHART_DAILY_TTL_SECONDS
         return daily_ttl, intraday_ttl
 
@@ -3363,7 +3820,7 @@ def get_stock_chart_payload(
                 instrument, cached, now_monotonic=now_monotonic, indicators=indicators
             )
 
-    with STOCK_CHART_BUILD_LOCK:
+    with _stock_chart_build_lock(thscode):
         now_monotonic = time.monotonic()
         daily_ttl, intraday_ttl = _ttls(now_monotonic)
         with STOCK_CHART_LOCK:
@@ -4564,6 +5021,147 @@ def _leading_component(
     return unavailable
 
 
+def get_etf_broad_monitor_payload(*, force: bool = False) -> dict[str, Any]:
+    """四只核心宽基ETF的实时行情 + 当日分时（带量）。
+
+    「宽基ETF监控」面板数据源（位于原「全球参考」英国/德法位置）。
+    行情走腾讯批量 quote，分时走腾讯 5 分钟K线（东财 trends2 备援），
+    均与 A 股持仓同一套抓取链路与节流；昨日全天量取自日K最后一根
+    已完成交易日 bar，用于"较昨日全天放量/缩量"对比。
+    单只 ETF 失败不拖垮整板，只标记该只 error。
+    """
+
+    now = time.monotonic()
+    with _ETF_BROAD_MONITOR_LOCK:
+        cached_payload = _ETF_BROAD_MONITOR_PAYLOAD_CACHE["payload"]
+        if (
+            cached_payload is not None
+            and not force
+            and now - float(_ETF_BROAD_MONITOR_PAYLOAD_CACHE.get("monotonic") or 0.0)
+            <= ETF_BROAD_MONITOR_TTL_SECONDS
+        ):
+            return cached_payload
+        failed_at = _ETF_BROAD_MONITOR_PAYLOAD_CACHE.get("failed_monotonic")
+        if (
+            cached_payload is not None
+            and failed_at is not None
+            and not force
+            and now - float(failed_at) <= ETF_BROAD_MONITOR_FAIL_BACKOFF_SECONDS
+        ):
+            return cached_payload
+
+    warnings: list[str] = []
+    quotes: dict[str, dict[str, Any]] = {}
+    try:
+        quotes = _fetch_tencent(
+            [str(inst["symbol"]) for inst in ETF_BROAD_MONITOR_INSTRUMENTS]
+        )
+    except Exception as exc:
+        warnings.append(f"行情暂不可用：{type(exc).__name__}")
+
+    items: list[dict[str, Any]] = []
+    for inst in ETF_BROAD_MONITOR_INSTRUMENTS:
+        symbol = str(inst["symbol"])
+        with _ETF_BROAD_MONITOR_LOCK:
+            entry = _ETF_BROAD_MONITOR_ENTRY_CACHE.setdefault(symbol, {})
+
+        item: dict[str, Any] = {
+            "symbol": symbol,
+            "thscode": inst["thscode"],
+            "name": inst["name"],
+        }
+        quote = quotes.get(symbol) or {}
+        if quote:
+            item.update(
+                {
+                    "price": quote.get("price"),
+                    "prev_close": quote.get("prev_close"),
+                    "change_pct": quote.get("change_pct"),
+                    "volume_lots": quote.get("volume_lots"),
+                    "amount_yi": quote.get("amount_yi"),
+                    "quote_time": quote.get("quote_time"),
+                }
+            )
+
+        instrument = {"symbol": symbol, "instrument_type": "etf"}
+        entry_now = time.monotonic()
+        intraday = entry.get("intraday")
+        if (
+            force
+            or intraday is None
+            or entry_now - float(entry.get("intraday_monotonic") or 0.0)
+            > ETF_BROAD_MONITOR_TTL_SECONDS
+        ):
+            try:
+                intraday = _fetch_chart_intraday(instrument, fallback_date=None)
+                entry["intraday"] = intraday
+                entry["intraday_monotonic"] = time.monotonic()
+                entry.pop("intraday_fail_monotonic", None)
+            except Exception as exc:
+                # 上次失败按短回退退避，避免持续打挂掉的上游。
+                entry["intraday_fail_monotonic"] = time.monotonic()
+                intraday = None
+                warnings.append(f"{inst['name']}分时暂不可用：{type(exc).__name__}")
+
+        trade_date = str((intraday or {}).get("trade_date") or "")
+        if (
+            force
+            or entry.get("prev_volume_lots") is None
+            or entry_now - float(entry.get("daily_monotonic") or 0.0)
+            > ETF_BROAD_MONITOR_DAILY_TTL_SECONDS
+        ):
+            try:
+                daily = _fetch_chart_daily(instrument)
+                entry["daily_monotonic"] = time.monotonic()
+                completed = [
+                    bar
+                    for bar in (daily.get("items") or [])
+                    if trade_date and str(bar.get("time") or "") < trade_date
+                ]
+                entry["prev_volume_lots"] = (
+                    _float(completed[-1].get("volume")) if completed else None
+                )
+            except Exception:
+                entry["daily_monotonic"] = time.monotonic()
+
+        prev_volume = entry.get("prev_volume_lots")
+        today_volume = item.get("volume_lots")
+        item["prev_volume_lots"] = prev_volume
+        item["volume_ratio"] = (
+            round(float(today_volume) / float(prev_volume), 3)
+            if prev_volume and today_volume
+            else None
+        )
+        item["intraday"] = (
+            {
+                "trade_date": intraday.get("trade_date"),
+                "period": intraday.get("period"),
+                "prev_close": intraday.get("prev_close"),
+                "items": intraday.get("items") or [],
+                "source": intraday.get("source"),
+            }
+            if intraday
+            else None
+        )
+        item["error"] = None if (quote or item["intraday"]) else "数据暂不可用"
+        items.append(item)
+
+    payload: dict[str, Any] = {
+        "ok": bool(quotes),
+        "as_of": _iso_now(),
+        "items": items,
+        "warnings": warnings,
+    }
+    with _ETF_BROAD_MONITOR_LOCK:
+        if payload["ok"]:
+            _ETF_BROAD_MONITOR_PAYLOAD_CACHE["payload"] = payload
+            _ETF_BROAD_MONITOR_PAYLOAD_CACHE["monotonic"] = time.monotonic()
+            _ETF_BROAD_MONITOR_PAYLOAD_CACHE["failed_monotonic"] = None
+        else:
+            _ETF_BROAD_MONITOR_PAYLOAD_CACHE["failed_monotonic"] = time.monotonic()
+    return payload
+
+
 def get_leading_indicators_payload() -> dict[str, Any]:
     """先行指标聚合：A50 期货 + 期权 PCR/IV + 两融 + 资金流 + 涨跌停 + 股指基差 + 货币市场 + 盘口不平衡。
 
@@ -4712,77 +5310,347 @@ def _fetch_em_bond_yields() -> list[dict[str, Any]]:
 # 隔夜全球标的行情缓存：数据只做 A 股盘面参考，缓存 5 分钟（约等于美股盘中
 # 一次价格变动周期），不跟随 3 秒行情节奏打东财；SK海力士随批次一起刷新。
 EM_OVERNIGHT_TTL_SECONDS = 300.0
+# 隔夜市场全部闭市时（周末/节假日/开盘前）放宽到 30 分钟：这段时间数据本来
+# 就不变，节流只是省掉无谓的上游请求。
+EM_OVERNIGHT_IDLE_TTL_SECONDS = 1800.0
+# 东财 ulist 单次 secids 串过长时会间歇性空响应断连；按 12 只分块，避免一次
+# 抖动让整块隔夜清单（含 SK海力士/三星等存储链核心）全部消失。
+# 单块失败只丢弃该块，剩余标的仍由腾讯/新浪/Naver/证交所备源补齐。
+_EM_OVERNIGHT_BATCH_SIZE = 12
 _EM_OVERNIGHT_CACHE: dict[str, Any] = {"monotonic": 0.0, "rows": []}
+_EM_OVERNIGHT_LOCK = threading.Lock()
+
+# 判断隔夜市场是否开市的代表标的：美股 / 欧股 / 韩股 / 商品（24×5）。
+# 用它们而不是全部 38 个标的，避免每次请求都遍历整张清单。
+_OVERNIGHT_SESSION_PROBES = ("b_NVDA", "b_GDAXI", "b_SKHYNIX", "b_CL")
 
 
-def _fetch_em_overnight_quotes() -> list[dict[str, Any]]:
+def _overnight_market_open() -> bool:
+    """任一隔夜市场处于交易时段 → 隔夜行情需要按 5 分钟节奏刷新。
+
+    隔夜市场的交易时段（北京时间美股 21:30-04:00、欧股 15:00-23:30、韩股
+    08:00-14:30）与 A 股完全错位：这一块看板的主使用场景恰好落在 A 股
+    收盘之后，所以刷新节奏必须按隔夜市场自己的时段来定，不能搭 A 股行情的
+    车。
+    """
+
+    for symbol in _OVERNIGHT_SESSION_PROBES:
+        try:
+            in_session, _next_open = _global_index_session(symbol)
+        except Exception:
+            continue
+        if in_session:
+            return True
+    return False
+
+
+def _overnight_ttl_seconds() -> float:
+    """当前该用的隔夜行情缓存 TTL（秒）。"""
+
+    return EM_OVERNIGHT_TTL_SECONDS if _overnight_market_open() else EM_OVERNIGHT_IDLE_TTL_SECONDS
+
+
+def _overnight_unit(item: dict[str, Any]) -> str:
+    """隔夜标的的计价单位：韩股是韩元，别的一律美元（欧股/台股指数算点）。"""
+
+    if item.get("unit"):
+        return str(item["unit"])
+    secid = str(item.get("em_secid") or "")
+    market = secid.split(".", 1)[0]
+    if market == "177":
+        return "韩元"
+    if market == "178":
+        return "台币"
+    if market == "100":
+        return "点"
+    return "美元"
+
+
+def _overnight_tencent_rows(
+    items: list[dict[str, Any]], quotes: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Build overnight rows for US-listed instruments quoted through Tencent."""
+
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        quote = quotes.get(str(item.get("tencent_symbol") or ""))
+        price = _float((quote or {}).get("price"))
+        if not quote or price is None or price <= 0:
+            continue
+        rows.append(
+            {
+                "symbol": item["symbol"],
+                "name": item["name"],
+                "group": item["group"],
+                "featured": bool(item.get("featured")),
+                "price": _safe_round(price, 4),
+                "change": _safe_round(_float(quote.get("change")), 4),
+                "change_pct": _safe_round(_float(quote.get("change_pct")), 3),
+                "open": _safe_round(_float(quote.get("open")), 4),
+                "high": _safe_round(_float(quote.get("high")), 4),
+                "low": _safe_round(_float(quote.get("low")), 4),
+                "volume": _safe_round(_float(quote.get("volume_lots")), 0),
+                "quote_time": str(quote.get("quote_time") or ""),
+                "unit": _overnight_unit(item),
+                "source": "腾讯财经",
+            }
+        )
+    return rows
+
+
+TWSE_QUOTE_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+
+
+def _overnight_sina_rows(
+    items: list[dict[str, Any]], globals_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Map Sina world-index rows into overnight instrument rows."""
+
+    by_symbol = {
+        str(row.get("symbol") or ""): row
+        for row in globals_rows
+        if isinstance(row, dict)
+    }
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        source_row = by_symbol.get(str(item.get("sina_symbol") or ""))
+        price = _float((source_row or {}).get("price"))
+        if not source_row or price is None or price <= 0:
+            continue
+        rows.append(
+            {
+                "symbol": item["symbol"],
+                "name": item["name"],
+                "group": item["group"],
+                "featured": bool(item.get("featured")),
+                "price": _safe_round(price, 4),
+                "change": _safe_round(_float(source_row.get("change")), 4),
+                "change_pct": _safe_round(_float(source_row.get("change_pct")), 3),
+                "open": _safe_round(_float(source_row.get("open")), 4),
+                "high": _safe_round(_float(source_row.get("high")), 4),
+                "low": _safe_round(_float(source_row.get("low")), 4),
+                "volume": _safe_round(_float(source_row.get("volume")), 0),
+                "quote_time": str(source_row.get("quote_time") or ""),
+                "unit": _overnight_unit(item),
+                "source": "新浪财经",
+            }
+        )
+    return rows
+
+
+def _twse_quote_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    price = _float(row.get("z")) or _float(row.get("l"))
+    previous = _float(row.get("y"))
+    if price is None or price <= 0:
+        return None
+    change = price - previous if previous not in (None, 0) else None
+    change_pct = change / previous * 100 if change is not None and previous else None
+    quote_time = ""
+    raw_date = str(row.get("d") or "")
+    raw_clock = str(row.get("t") or "")
+    if re.fullmatch(r"\d{8}", raw_date) and re.fullmatch(r"\d{2}:\d{2}:\d{2}", raw_clock):
+        quote_time = datetime.strptime(
+            f"{raw_date} {raw_clock}", "%Y%m%d %H:%M:%S"
+        ).replace(tzinfo=CN_TZ).isoformat(timespec="seconds")
+    return {
+        "price": _safe_round(price, 4),
+        "change": _safe_round(change, 4),
+        "change_pct": _safe_round(change_pct, 3),
+        "open": _safe_round(_float(row.get("o")), 4),
+        "high": _safe_round(_float(row.get("h")), 4),
+        "low": _safe_round(_float(row.get("l")), 4),
+        "volume": _safe_round(_float(row.get("m")), 0),
+        "quote_time": quote_time,
+    }
+
+
+def _fetch_twse_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
+    """Official TWSE/TPEx batch fallback for TAIEX and local stocks.
+
+    A code may use the ``otc:5347`` form for Taipei Exchange (上柜) stocks;
+    plain codes query the listed TWSE market.
+    """
+
+    wanted = list(dict.fromkeys(str(code).lower() for code in codes if code))
+    if not wanted:
+        return {}
+    ex_ch = "|".join(
+        f"{'otc' if ':' in code else 'tse'}_{code.split(':', 1)[-1]}.tw"
+        for code in wanted
+    )
+    response = LIVE_SESSION.get(
+        TWSE_QUOTE_URL,
+        params={"ex_ch": ex_ch},
+        headers={
+            "User-Agent": UA,
+            "Referer": "https://mis.twse.com.tw/stock/index.jsp",
+        },
+        timeout=(2.5, 6.0),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    quotes: dict[str, dict[str, Any]] = {}
+    for row in payload.get("msgArray") or []:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("c") or "").lower()
+        if not code:
+            continue
+        quote = _twse_quote_row(row)
+        if quote is not None:
+            quotes[code] = quote
+    return quotes
+
+
+def _fetch_twse_taiex_quote() -> dict[str, Any]:
+    quote = _fetch_twse_quotes(["t00"]).get("t00")
+    if quote is None:
+        raise RuntimeError("TWSE returned no valid TAIEX quote")
+    return quote
+
+
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    """按固定长度切块（保持原顺序）。"""
+    step = max(1, int(size))
+    return [items[index:index + step] for index in range(0, len(items), step)]
+
+
+def _append_overnight_batch_rows(
+    batch: list[dict[str, Any]], rows: list[dict[str, Any]]
+) -> None:
+    """向东财 ulist 取一块隔夜行情并追加到 rows；失败抛异常由调用方降级。
+
+    走主机轮换（push2 / 23 / 17 / 48 …）：东财按主机封禁，单台返回
+    "Empty reply from server" 时换一台即可，不必把这一块的标的丢掉。
+    """
+    payload = _curl_get_json_rotating(
+        "https://{host}/api/qt/ulist.np/get?secids="
+        + ",".join(str(item["em_secid"]) for item in batch)
+        + "&fields=f2,f3,f4,f5,f12,f14,f15,f16,f17,f18,f124&fltt=2",
+        referer="https://quote.eastmoney.com/",
+    )
+    data = payload.get("data") or {}
+    diff = data.get("diff") or []
+    if isinstance(diff, dict):
+        diff = list(diff.values())
+    by_code = {str(row.get("f12") or ""): row for row in diff if isinstance(row, dict)}
+    for item in batch:
+        row = by_code.get(str(item["em_secid"]).split(".", 1)[1])
+        if not row:
+            continue
+        price = _float(row.get("f2"))
+        if price is None or price <= 0:
+            continue
+        previous = _float(row.get("f18"))
+        change = _float(row.get("f4"))
+        change_pct = _float(row.get("f3"))
+        if change is None and previous not in (None, 0):
+            change = price - previous
+        if change_pct is None and change is not None and previous not in (None, 0):
+            change_pct = change / previous * 100
+        quote_ts = _float(row.get("f124"))
+        quote_time = (
+            datetime.fromtimestamp(quote_ts, CN_TZ).isoformat(timespec="seconds")
+            if quote_ts and quote_ts > 0
+            else ""
+        )
+        rows.append(
+            {
+                "symbol": item["symbol"],
+                "name": item["name"],
+                "group": item["group"],
+                "featured": bool(item.get("featured")),
+                "price": _safe_round(price, 4),
+                "change": _safe_round(change, 4),
+                "change_pct": _safe_round(change_pct, 3),
+                "open": _safe_round(_float(row.get("f17")), 4),
+                "high": _safe_round(_float(row.get("f15")), 4),
+                "low": _safe_round(_float(row.get("f16")), 4),
+                "volume": _safe_round(_float(row.get("f5")), 0),
+                "quote_time": quote_time,
+                "unit": _overnight_unit(item),
+                "source": "东方财富",
+            }
+        )
+
+
+def _fetch_em_overnight_quotes(*, force: bool = False) -> list[dict[str, Any]]:
     """隔夜全球标的行情：东财 ulist 批量取美股/欧股/白银，韩股走 Naver。
 
     ulist 单次请求覆盖全部 secid（共享东财节流），f12=代码按 em_secid 尾段
     映射回配置项；停牌/无效报价（f2 非正数）跳过。SK海力士/三星电子等
     韩国个股由 Naver 日K最近两根 bar 推导。东财被 WAF 拦截时，Naver
     部分仍独立返回，不因单一数据源失败而整块为空。
+
+    ``force=True`` 跳过缓存判断（后台刷新器使用）；缓存 TTL 随隔夜市场是否
+    开市在 5 分钟与 30 分钟之间切换。
     """
 
     cached_rows = _EM_OVERNIGHT_CACHE["rows"]
-    if cached_rows and time.monotonic() - _EM_OVERNIGHT_CACHE["monotonic"] < EM_OVERNIGHT_TTL_SECONDS:
+    if (
+        not force
+        and cached_rows
+        and time.monotonic() - _EM_OVERNIGHT_CACHE["monotonic"] < _overnight_ttl_seconds()
+    ):
         return [dict(row) for row in cached_rows]
 
     rows: list[dict[str, Any]] = []
     batched = [item for item in EM_OVERNIGHT_INSTRUMENTS if item.get("em_secid")]
-    try:
-        payload = _curl_get_json(
-            "https://push2.eastmoney.com/api/qt/ulist.np/get?secids="
-            + ",".join(str(item["em_secid"]) for item in batched)
-            + "&fields=f2,f3,f4,f12,f14,f15,f16,f18,f124&fltt=2",
-            referer="https://quote.eastmoney.com/",
-        )
-        data = payload.get("data") or {}
-        diff = data.get("diff") or []
-        if isinstance(diff, dict):
-            diff = list(diff.values())
-        by_code = {str(row.get("f12") or ""): row for row in diff if isinstance(row, dict)}
-        for item in batched:
-            row = by_code.get(str(item["em_secid"]).split(".", 1)[1])
-            if not row:
-                continue
-            price = _float(row.get("f2"))
-            if price is None or price <= 0:
-                continue
-            previous = _float(row.get("f18"))
-            change = _float(row.get("f4"))
-            change_pct = _float(row.get("f3"))
-            if change is None and previous not in (None, 0):
-                change = price - previous
-            if change_pct is None and change is not None and previous not in (None, 0):
-                change_pct = change / previous * 100
-            quote_ts = _float(row.get("f124"))
-            quote_time = (
-                datetime.fromtimestamp(quote_ts, CN_TZ).isoformat(timespec="seconds")
-                if quote_ts and quote_ts > 0
-                else ""
-            )
-            rows.append(
-                {
-                    "symbol": item["symbol"],
-                    "name": item["name"],
-                    "group": item["group"],
-                    "price": _safe_round(price, 4),
-                    "change": _safe_round(change, 4),
-                    "change_pct": _safe_round(change_pct, 3),
-                    "high": _safe_round(_float(row.get("f15")), 4),
-                    "low": _safe_round(_float(row.get("f16")), 4),
-                    "quote_time": quote_time,
-                    "unit": "点" if item["group"] in {"欧股指数", "全球指数"} else "美元",
-                    "source": "东方财富",
-                }
-            )
-    except Exception:
-        pass
+    # 分块请求：东财 ulist 对长 secids 串会间歇性「空响应直接断连」（curl 52），
+    # 整批一个请求时一次抖动就会让全部 51 只标的消失——包括 SK海力士/三星等
+    # 存储链核心。分块后单块失败只丢掉该块，其余照常返回；块内失败再对半拆一次。
+    for chunk in _chunked(batched, _EM_OVERNIGHT_BATCH_SIZE):
+        try:
+            _append_overnight_batch_rows(chunk, rows)
+        except Exception:
+            if len(chunk) > 1:
+                midpoint = len(chunk) // 2
+                for half in (chunk[:midpoint], chunk[midpoint:]):
+                    try:
+                        _append_overnight_batch_rows(half, rows)
+                    except Exception:
+                        continue
+            continue
 
+    # 2026-10-26 迁入的半导体/芯片美股使用腾讯批量行情：与全球参考同一套
+    # us* 代码，不依赖东财美股 secid，且腾讯公开行情不受东财风控影响。东财
+    # 批量已返回的存储股不重复拉取；东财空响应时腾讯顺带作为备源补齐。
+    covered = {str(row.get("symbol") or "") for row in rows}
+    tencent_items = [
+        item
+        for item in EM_OVERNIGHT_INSTRUMENTS
+        if item.get("tencent_symbol") and str(item["symbol"]) not in covered
+    ]
+    if tencent_items:
+        try:
+            tencent_quotes = _fetch_tencent(
+                list(dict.fromkeys(str(item["tencent_symbol"]) for item in tencent_items))
+            )
+            rows.extend(_overnight_tencent_rows(tencent_items, tencent_quotes))
+        except Exception:
+            pass
+
+    # 日经等新浪全球指数：仅在其它源未覆盖时补一次，不影响美股/韩股主链。
+    covered = {str(row.get("symbol") or "") for row in rows}
+    sina_items = [
+        item
+        for item in EM_OVERNIGHT_INSTRUMENTS
+        if item.get("sina_symbol") and str(item["symbol"]) not in covered
+    ]
+    if sina_items:
+        try:
+            rows.extend(_overnight_sina_rows(sina_items, _fetch_sina_globals()))
+        except Exception:
+            pass
+
+    # Naver 兜底：只给东财没覆盖到的品种用。东财已覆盖的（韩股 177.*）不再
+    # 去打 Naver——Naver 在国内经常整站连不上，每次超时都要等好几秒。
+    covered = {str(row.get("symbol") or "") for row in rows}
     for item in EM_OVERNIGHT_INSTRUMENTS:
         naver_symbol = str(item.get("naver_symbol") or "")
         if not naver_symbol:
+            continue
+        if str(item.get("symbol") or "") in covered:
             continue
         try:
             naver_daily = _fetch_naver_daily_chart(naver_symbol, count=2)
@@ -4799,11 +5667,14 @@ def _fetch_em_overnight_quotes() -> list[dict[str, Any]]:
                     "symbol": item["symbol"],
                     "name": item["name"],
                     "group": item["group"],
+                    "featured": bool(item.get("featured")),
                     "price": _safe_round(latest_close, 0),
                     "change": _safe_round(latest_close - prior_close, 0),
                     "change_pct": _safe_round((latest_close / prior_close - 1) * 100, 3),
+                    "open": _safe_round(_float(latest.get("open")), 0),
                     "high": _safe_round(_float(latest.get("high")), 0),
                     "low": _safe_round(_float(latest.get("low")), 0),
+                    "volume": _safe_round(_float(latest.get("volume")), 0),
                     "quote_time": str(latest.get("time") or ""),
                     "unit": "韩元",
                     "source": "Naver财经(日K推导)",
@@ -4812,13 +5683,307 @@ def _fetch_em_overnight_quotes() -> list[dict[str, Any]]:
         except Exception:
             continue
 
+    # 台湾加权与台湾本地半导体个股：东财批量不可用时，用台湾证交所官方 MIS
+    # 接口批量兜底（一次请求覆盖指数和全部缺失个股），避免单一数据源风控
+    # 导致整个台湾分组从迁移清单消失。
+    covered = {str(row.get("symbol") or "") for row in rows}
+    taiwan_items = [
+        item
+        for item in EM_OVERNIGHT_INSTRUMENTS
+        if str(item["symbol"]) not in covered
+        and (
+            str(item["symbol"]) == "b_TWII"
+            or str(item.get("em_secid") or "").split(".", 1)[0] == "178"
+        )
+    ]
+    if taiwan_items:
+        try:
+            twse_codes = [
+                "t00"
+                if item["symbol"] == "b_TWII"
+                else str(item["em_secid"]).split(".", 1)[1]
+                for item in taiwan_items
+            ]
+            twse_specs = [
+                f"otc:{code}" if item.get("twse_market") == "otc" else code
+                for item, code in zip(taiwan_items, twse_codes)
+            ]
+            twse_quotes = _fetch_twse_quotes(twse_specs)
+            for item, code in zip(taiwan_items, twse_codes):
+                quote = twse_quotes.get(code.lower())
+                if quote is None:
+                    continue
+                rows.append(
+                    {
+                        "symbol": item["symbol"],
+                        "name": item["name"],
+                        "group": item["group"],
+                        "featured": bool(item.get("featured")),
+                        "quote_time": quote["quote_time"],
+                        "unit": _overnight_unit(item),
+                        "source": "台湾证券交易所",
+                        **{
+                            key: value
+                            for key, value in quote.items()
+                            if key != "quote_time"
+                        },
+                    }
+                )
+        except Exception:
+            pass
+
     if not rows:
-        raise RuntimeError("eastmoney/naver returned no overnight quotes")
+        raise RuntimeError("eastmoney/tencent/naver/twse returned no overnight quotes")
+    # 单个数据源临时失败时，不要把标的整只从看板上摘掉：沿用上一轮的行并标记
+    # 为延迟。宁可显示一个带时间戳的旧价，也不要让"隔夜全球标的"凭空少几只。
+    with _EM_OVERNIGHT_LOCK:
+        previous_rows = {str(row.get("symbol") or ""): row for row in (_EM_OVERNIGHT_CACHE["rows"] or [])}
+    fresh_symbols = {str(row.get("symbol") or "") for row in rows}
+    for symbol, previous in previous_rows.items():
+        if symbol in fresh_symbols:
+            continue
+        carried = dict(previous)
+        carried["is_stale"] = True
+        rows.append(carried)
     _overnight_order = {item["symbol"]: idx for idx, item in enumerate(EM_OVERNIGHT_INSTRUMENTS)}
     rows.sort(key=lambda row: _overnight_order.get(row["symbol"], len(_overnight_order)))
-    _EM_OVERNIGHT_CACHE["rows"] = rows
-    _EM_OVERNIGHT_CACHE["monotonic"] = time.monotonic()
+    with _EM_OVERNIGHT_LOCK:
+        _EM_OVERNIGHT_CACHE["rows"] = rows
+        _EM_OVERNIGHT_CACHE["monotonic"] = time.monotonic()
     return [dict(row) for row in rows]
+
+
+def _filter_globals_superseded_by_overnight(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop global-reference rows whose instrument moved to the overnight block."""
+
+    return [
+        row
+        for row in rows
+        if str(row.get("symbol") or "").lower()
+        not in OVERNIGHT_SUPERSEDED_GLOBAL_SYMBOLS
+    ]
+
+
+def _overlay_overnight_globals(
+    globals_rows: Any, overnight_rows: list[dict[str, Any]]
+) -> None:
+    """把隔夜行情的新价覆盖到「全球参考」里的同一只票上。
+
+    「全球参考」的美股（usNVDA/usWDC…）与「隔夜全球标的」（b_NVDA/b_WDC…）
+    是同一批证券，但一个走腾讯批量报价（搭 A 股行情的车，收盘后冻结）、一个
+    走东财 ulist（隔夜专用刷新）。不覆盖的话，同一屏上同一只票会显示两个价。
+    按 symbol 与 ticker 两条线对齐。
+    """
+
+    if not isinstance(globals_rows, list):
+        return
+    by_symbol: dict[str, dict[str, Any]] = {}
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for row in overnight_rows:
+        symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
+        by_symbol[symbol] = row
+        _, _, ticker = symbol.partition("_")
+        if ticker:
+            by_ticker[ticker.upper()] = row
+
+    fields = ("price", "change", "change_pct", "high", "low", "quote_time")
+    for row in globals_rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "")
+        matched = by_symbol.get(symbol)
+        if matched is None and symbol.lower().startswith("us"):
+            matched = by_ticker.get(symbol[2:].upper())
+        if matched is None:
+            continue
+        for key in fields:
+            if matched.get(key) is not None:
+                row[key] = matched.get(key)
+        if matched.get("source"):
+            row["source"] = matched.get("source")
+
+
+def ensure_overnight_refresh(force: bool = False) -> bool:
+    """后台刷新隔夜行情（不阻塞请求线程）。
+
+    隔夜行情有自己的会话感知节奏（盘中 5 分钟 / 闭市 30 分钟），不再依赖
+    A 股行情载荷的重建——A 股 15:00 收盘后载荷就冻结了，而这正是美股
+    21:30-04:00 的主场景。
+    """
+
+    def build() -> None:
+        rows = _fetch_em_overnight_quotes(force=force)
+        if not rows:
+            raise RuntimeError("隔夜行情刷新后仍为空")
+
+    return _spawn_maintenance("overnight", build)
+
+
+def _overlay_overnight_quotes(payload: dict[str, Any]) -> dict[str, Any]:
+    """把最新的隔夜行情覆盖进载荷。
+
+    载荷里的 ``markets.overnight`` 来自 A 股行情那次重建，A 股收盘后就不会
+    再变。这里在读取路径单独取隔夜缓存：命中直接覆盖；已过期则触发一次
+    后台刷新，本轮先返回上一份（附 refreshing 标记），下一轮轮询即可拿到
+    新价。
+    """
+
+    markets = payload.get("markets")
+    if not isinstance(markets, dict):
+        return payload
+
+    ttl = _overnight_ttl_seconds()
+    with _EM_OVERNIGHT_LOCK:
+        rows = [dict(row) for row in (_EM_OVERNIGHT_CACHE["rows"] or [])]
+        age = time.monotonic() - float(_EM_OVERNIGHT_CACHE["monotonic"] or 0.0)
+    stale = bool(rows) and age >= ttl
+    if stale:
+        ensure_overnight_refresh()
+
+    if rows:
+        markets["overnight"] = rows
+        _overlay_overnight_globals(markets.get("global"), rows)
+    quote_times = sorted(
+        str(row.get("quote_time") or "") for row in rows if row.get("quote_time")
+    )
+    payload["overnight_refresh"] = {
+        "rows": len(rows),
+        "age_seconds": round(max(0.0, age), 1),
+        "ttl_seconds": ttl,
+        "stale": stale,
+        "refreshing": stale,
+        "market_open": _overnight_market_open(),
+        "as_of": quote_times[-1] if quote_times else "",
+    }
+    payload["overnight_correlation"] = _overnight_correlation_view()
+    return payload
+
+
+# ── 隔夜标的 × 持仓相关度快照 ────────────────────────────────────────────────
+# 口径与 scripts/overnight_correlation.py 完全一致：组合序列取个人指数日K
+# （信用+普通账户市值加权），same = corr(隔夜标的 t 日收益, 组合 t 日收益)，
+# next = corr(隔夜标的 t 日收益, 组合 t+1 交易日收益)。后者衡量"隔夜信息对
+# A 股次日开盘的解释力"。
+#
+# 候选集是「存储链 + AI 链」精选：德指/法指/黄金/中概同样可能越过 0.15
+# 阈值，但全部铺开会挤爆单行，只保留对持仓有解释力/对冲意义的那几个。
+OVERNIGHT_CORRELATION_CANDIDATES = (
+    "b_SKHYNIX",
+    "b_SAMSUNG",
+    "b_WDC",
+    "b_SNDK",
+    "b_NVDA",
+    "b_TSLA",
+    "b_STX",
+    "b_MU",
+)
+OVERNIGHT_CORRELATION_WINDOW = 180
+OVERNIGHT_CORRELATION_TTL_SECONDS = 12 * 3600.0
+_OVERNIGHT_CORRELATION_CACHE: dict[str, Any] = {"payload": None, "monotonic": 0.0}
+_OVERNIGHT_CORRELATION_LOCK = threading.Lock()
+
+
+def _overnight_correlation_closes(item: dict[str, Any], count: int) -> dict[str, float]:
+    """按标的类型取日K收盘序列。
+
+    美股/中概 ADR 走新浪（东财 push2his 对这些 secid 直连被封），其余有
+    东财 secid 的走东财（韩股 177.* 实测可用，且含当日 bar），只有 Naver
+    代码的才走 Naver——Naver 在国内常整站连不上，SSL 握手就会超时。
+    """
+
+    module = overnight_correlation_module
+    secid = str(item.get("em_secid") or "")
+    ticker = _us_ticker_from_secid(secid)
+    if ticker:
+        return module.fetch_sina_us_daily(ticker)
+    if secid:
+        return module.fetch_eastmoney_daily(secid, count)
+    naver_symbol = str(item.get("naver_symbol") or "")
+    if naver_symbol:
+        return module.fetch_naver_daily(naver_symbol, count)
+    raise RuntimeError(f"{item.get('symbol')} 没有可用日K源")
+
+
+def _compute_overnight_correlation_snapshot() -> dict[str, Any]:
+    """重算隔夜标的 × 持仓组合的相关度快照。"""
+
+    module = overnight_correlation_module
+    portfolio_closes = module.load_portfolio_closes()
+    portfolio_returns = module.daily_returns(portfolio_closes)
+    all_dates = sorted(portfolio_returns)
+    if not all_dates:
+        raise RuntimeError("个人指数日K为空，无法重算相关度")
+    window_dates = set(all_dates[-max(20, OVERNIGHT_CORRELATION_WINDOW) :])
+
+    by_symbol = {str(item["symbol"]): item for item in EM_OVERNIGHT_INSTRUMENTS}
+    correlation: dict[str, dict[str, float]] = {}
+    failures: list[str] = []
+    for symbol in OVERNIGHT_CORRELATION_CANDIDATES:
+        item = by_symbol.get(symbol)
+        if not item:
+            failures.append(f"{symbol}: 未在隔夜清单中")
+            continue
+        try:
+            closes = _overnight_correlation_closes(
+                item, OVERNIGHT_CORRELATION_WINDOW + 120
+            )
+        except Exception as exc:
+            failures.append(f"{symbol}: {type(exc).__name__}")
+            continue
+        result = module.correlation_vs_portfolio(
+            module.daily_returns(closes), portfolio_returns, all_dates, window_dates
+        )
+        same = result["same"]
+        following = result["next"]
+        if same is None or following is None:
+            failures.append(f"{symbol}: 交易日重叠不足")
+            continue
+        correlation[symbol] = {"same": round(same, 4), "next": round(following, 4)}
+    if not correlation:
+        raise RuntimeError("相关度重算没有产出任何标的：" + "; ".join(failures[:6]))
+    return {
+        "generated_at": _iso_now(),
+        "as_of": all_dates[-1],
+        "window": OVERNIGHT_CORRELATION_WINDOW,
+        "correlation": correlation,
+        "failures": failures,
+    }
+
+
+def ensure_overnight_correlation_refresh(force: bool = False) -> bool:
+    """后台重算相关度快照（不阻塞请求线程）。
+
+    重算要拉全历史日K（新浪美股一次 3000+ 根），很贵，所以一天两次，
+    失败不重试到下一次调度。
+    """
+
+    def build() -> None:
+        snapshot = _compute_overnight_correlation_snapshot()
+        with _OVERNIGHT_CORRELATION_LOCK:
+            _OVERNIGHT_CORRELATION_CACHE["payload"] = snapshot
+            _OVERNIGHT_CORRELATION_CACHE["monotonic"] = time.monotonic()
+
+    return _spawn_maintenance("overnight_correlation", build)
+
+
+def _overnight_correlation_view() -> dict[str, Any]:
+    """当前可用的相关度快照（过期则触发后台重算，本轮先返回上一份）。"""
+
+    with _OVERNIGHT_CORRELATION_LOCK:
+        payload = _OVERNIGHT_CORRELATION_CACHE["payload"]
+        age = time.monotonic() - float(_OVERNIGHT_CORRELATION_CACHE["monotonic"] or 0.0)
+    stale = payload is not None and age >= OVERNIGHT_CORRELATION_TTL_SECONDS
+    if stale:
+        ensure_overnight_correlation_refresh()
+    view = dict(payload or {})
+    view["age_seconds"] = round(max(0.0, age), 1)
+    view["stale"] = stale
+    view["ttl_seconds"] = OVERNIGHT_CORRELATION_TTL_SECONDS
+    return view
 
 
 # 美债收益率官方备援：财政部每日收益率曲线 CSV（stock_all_in_1 共享指南 1.3b，
@@ -5467,6 +6632,10 @@ def _build_quotes_payload() -> dict[str, Any]:
     except Exception as exc:
         overnight = []
         errors.append(f"隔夜全球标的暂不可用：{type(exc).__name__}")
+
+    # 隔夜模块接管的证券在服务端就从全球参考移除，前端仍按名称/代码二次去重
+    # 以兼容旧缓存。提示：即使隔夜源本轮失败，也不把同一证券重新塞回全球参考。
+    globals_ = _filter_globals_superseded_by_overnight(globals_)
 
     position_rows, main_summary = _build_portfolio_position_block(
         portfolio_config,
@@ -8216,6 +9385,9 @@ def get_quotes_payload(
             refreshing = ensure_quote_refresh()
         served = _cached_quotes_payload(cached, age, last_error, refreshing)
         _backfill_portfolio_views_if_missing(served)
+        # 隔夜行情与 A 股行情的刷新节奏不同轴（隔夜市场的主场景在 A 股收盘
+        # 之后），单独在读取路径覆盖一次。
+        _overlay_overnight_quotes(served)
         if portfolio_id != MAIN_PORTFOLIO_ID:
             return _scoped_quotes_view(served, portfolio_id)
         return _attach_position_advice(served)
@@ -8283,6 +9455,7 @@ def get_quotes_payload(
         ],
         "errors": [error],
     }
+    _overlay_overnight_quotes(cold_payload)
     if portfolio_id != MAIN_PORTFOLIO_ID:
         return cold_payload
     return _attach_position_advice(cold_payload)
@@ -9471,6 +10644,122 @@ def _fail_closed_rebalance_payload(
     return result
 
 
+_BREAKEVEN_CACHE: dict[str, Any] = {"payload": None, "monotonic": 0.0, "fingerprint": None}
+_BREAKEVEN_CACHE_LOCK = threading.Lock()
+# 回本测算是对统计量的长周期刻画，不需要跟随 15 秒风险刷新；30 秒既能反映
+# 盘中显著变化，也避免把 8000 条蒙特卡洛路径压在每次轮询上。
+BREAKEVEN_CACHE_TTL_SECONDS = 30.0
+
+
+def get_breakeven_payload(
+    force: bool = False,
+    portfolio_id: str = MAIN_PORTFOLIO_ID,
+) -> dict[str, Any]:
+    """Return the breakeven feasibility report for one portfolio.
+
+    Reuses the risk snapshot instead of refetching quotes, and passes the risk
+    engine's own history loader so the correlation matrix is estimated on exactly
+    the same forward-adjusted closes the volatility figures came from.
+    """
+
+    portfolio_id = str(portfolio_id or MAIN_PORTFOLIO_ID)
+    entry = _resolve_portfolio_entry(portfolio_id)
+    if entry is None:
+        raise PortfolioNotFound(f"组合不存在：{portfolio_id}")
+
+    risk_payload = get_risk_payload(force=force, portfolio_id=portfolio_id)
+    # 注意：不能直接用风险快照的 input_fingerprint 做缓存键——它把每条报价的
+    # quote_time 也编码进去，而行情每次抓取时间都不同，指纹必然变化，缓存将
+    # 永远无法命中。这里只绑定「会影响回本数字」的稳定因子：持仓与成本、
+    # 现金负债、以及每只标的的价格。
+    cache_key = _breakeven_cache_key(risk_payload, portfolio_id)
+    now = time.monotonic()
+    if not force and cache_key:
+        with _BREAKEVEN_CACHE_LOCK:
+            cached = _BREAKEVEN_CACHE.get("payload")
+            age = now - float(_BREAKEVEN_CACHE.get("monotonic") or 0.0)
+            if (
+                isinstance(cached, dict)
+                and _BREAKEVEN_CACHE.get("fingerprint") == cache_key
+                and age < BREAKEVEN_CACHE_TTL_SECONDS
+            ):
+                result = copy.deepcopy(cached)
+                result["cache"] = {"source": "memory", "age_seconds": round(age, 3)}
+                return result
+
+    from scripts.breakeven_engine import build_breakeven_report
+
+    try:
+        from scripts.portfolio_risk_engine import _load_history_for_position
+    except ModuleNotFoundError:
+        from portfolio_risk_engine import _load_history_for_position
+
+    def load_history(position: dict[str, Any]):
+        return _load_history_for_position(
+            position,
+            minimum_sessions=60,
+            tolerance_pct=0.5,
+            force=False,
+        ).get("frame")
+
+    portfolio_config = (
+        _read_json(PORTFOLIO_PATH)
+        if portfolio_id == MAIN_PORTFOLIO_ID
+        else copy.deepcopy(entry["config"])
+    )
+    report = build_breakeven_report(
+        risk_payload,
+        portfolio_config,
+        history_loader=load_history,
+    )
+    report["portfolio_id"] = portfolio_id
+    report["portfolio_label"] = entry["label"]
+    report["cache"] = {"source": "computed", "age_seconds": 0.0}
+    if cache_key:
+        with _BREAKEVEN_CACHE_LOCK:
+            _BREAKEVEN_CACHE.update(
+                {
+                    "payload": copy.deepcopy(report),
+                    "monotonic": time.monotonic(),
+                    "fingerprint": cache_key,
+                }
+            )
+    return report
+
+
+def _breakeven_cache_key(risk_payload: dict[str, Any], portfolio_id: str) -> str:
+    """Stable digest of everything that can change a breakeven number.
+
+    Deliberately excludes quote timestamps: they change on every fetch, so
+    including them would defeat the cache entirely.
+    """
+
+    rows = []
+    for position in risk_payload.get("positions") or []:
+        rows.append(
+            {
+                "thscode": position.get("thscode"),
+                "quantity": position.get("quantity"),
+                "price": position.get("price"),
+                "broker_cost": position.get("broker_cost"),
+                "volatility": position.get("annualized_volatility_pct"),
+            }
+        )
+    rows.sort(key=lambda item: str(item.get("thscode") or ""))
+    metrics = risk_payload.get("metrics") or {}
+    payload = {
+        "portfolio_id": portfolio_id,
+        "positions": rows,
+        "cash": metrics.get("cash_cny"),
+        "debt": metrics.get("debt_cny"),
+    }
+    try:
+        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def get_risk_payload(
     force: bool = False,
     quotes_payload: dict[str, Any] | None = None,
@@ -9512,6 +10801,9 @@ def get_risk_payload(
             raise TypeError("risk snapshot must be a JSON object")
         result = _fail_closed_risk_payload(payload)
         result["portfolio_id"] = portfolio_id
+        result["portfolio_config_id"] = str(
+            entry["config"].get("portfolio_id") or portfolio_id
+        )
         result["portfolio_label"] = entry["label"]
         return result
     except Exception as exc:
@@ -9521,6 +10813,9 @@ def get_risk_payload(
             error = f"{error}; portfolio: {config_error}"[:500]
         return {
             "ok": False,
+            "portfolio_id": portfolio_id,
+            "portfolio_config_id": str(entry["config"].get("portfolio_id") or portfolio_id),
+            "portfolio_label": entry["label"],
             "generated_at": _iso_now(),
             "state": "unavailable",
             "risk_state": "UNKNOWN",
@@ -10422,6 +11717,19 @@ def get_decision_context(force: bool = False) -> dict[str, Any]:
                 fallback = _decision_cache_view(cached, age, "stale-memory")
                 fallback["ok"] = False
                 fallback["decision_ready"] = False
+                fallback["risk"] = _fail_closed_risk_payload(
+                    fallback.get("risk") if isinstance(fallback.get("risk"), dict) else {},
+                    force=True,
+                    reason=error,
+                )
+                fallback["rebalance"] = _fail_closed_rebalance_payload(
+                    fallback.get("rebalance")
+                    if isinstance(fallback.get("rebalance"), dict)
+                    else {},
+                    reason_code="DECISION_REFRESH_FAILED",
+                    reason_message=error,
+                )
+                fallback["rebalance"]["decision_snapshot_id"] = fallback.get("snapshot_id")
                 quality = fallback.setdefault("data_quality", {})
                 quality["status"] = "CRITICAL"
                 quality["errors"] = list(dict.fromkeys([*(quality.get("errors") or []), error]))
@@ -10474,8 +11782,10 @@ def _personal_index_quote_rows() -> tuple[dict[str, dict[str, Any]], str]:
             "close": value["close"],
             "high": value["high"],
             "low": value["low"],
-            # 个人指数历史用"股"口径，日K序列用"手"，两者相差 100 倍。
-            "volume": value["volume_lots"] * 100.0,
+            # 单位必须与历史 kline 对齐：历史序列 volume = Σ(持仓数量 × 腾讯成交量(手))，
+            # 即「股·手」量纲。腾讯 quote 的 f6 已经是「手」，此处**不能**再乘 100——
+            # 之前乘了 100，导致当日 bar 的量级是历史的约 100 倍（实测 6.7e13 vs 5.7e11）。
+            "volume": value["volume_lots"],
             "date": value["date"],
         }
         for key, value in quotes.items()
@@ -11196,6 +12506,8 @@ def _after_registry_change() -> None:
 
 class DashboardHandler(SimpleHTTPRequestHandler):
     server_version = "LDLPortfolioDashboard/1.0"
+    # 单个连接最多占用 30 秒：客户端开着连接不发数据时不要永久占住线程。
+    timeout = 30
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
@@ -11306,6 +12618,40 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.SERVICE_UNAVAILABLE,
                 )
             return
+        if parsed.path == "/api/holding-fundamentals":
+            query = parse_qs(parsed.query)
+            force = str((query.get("refresh") or [""])[0]).lower() in ("1", "true", "yes")
+            portfolio_id = str((query.get("portfolio") or [""])[0]) or MAIN_PORTFOLIO_ID
+            entry = _resolve_portfolio_entry(portfolio_id)
+            if entry is None:
+                self._send_json(
+                    {"ok": False, "error": f"组合不存在：{portfolio_id}"}, HTTPStatus.NOT_FOUND
+                )
+                return
+            try:
+                payload = holding_fundamentals_module.get_holding_fundamentals(
+                    entry["positions"], force=force
+                )
+            except Exception as exc:
+                # 财报是降低频率的附加信息：取数失败要说清楚失败了，不能返回
+                # 空 entries 让前端把「查不到」显示成「未披露」。
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": _redact_error(f"{type(exc).__name__}: {exc}"),
+                        "portfolio_id": portfolio_id,
+                    },
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "portfolio_id": portfolio_id,
+                    **payload,
+                }
+            )
+            return
         if parsed.path == "/api/quotes":
             query = parse_qs(parsed.query)
             force = str((query.get("refresh") or [""])[0]).lower() in ("1", "true", "yes")
@@ -11396,7 +12742,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     {
                         "ok": False,
                         "error_code": "SYMBOL_NOT_IN_PORTFOLIO",
-                        "error": "symbol is not in the current portfolio",
+                        "error": "symbol is not in configured portfolios or the watchlist",
                     },
                     HTTPStatus.NOT_FOUND,
                 )
@@ -11428,7 +12774,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     {
                         "ok": False,
                         "error_code": "SYMBOL_NOT_IN_PORTFOLIO",
-                        "error": "symbol is not in the current portfolio",
+                        "error": "symbol is not in configured portfolios or the watchlist",
                     },
                     HTTPStatus.NOT_FOUND,
                 )
@@ -11486,6 +12832,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/leading-indicators":
             self._send_json(get_leading_indicators_payload(), HTTPStatus.OK)
+            return
+        if parsed.path == "/api/etf-broad-monitor":
+            query = parse_qs(parsed.query)
+            force = str((query.get("refresh") or [""])[0]).lower() in ("1", "true", "yes")
+            payload = get_etf_broad_monitor_payload(force=force)
+            self._send_json(
+                payload,
+                HTTPStatus.OK if payload.get("ok") else HTTPStatus.SERVICE_UNAVAILABLE,
+            )
             return
         if parsed.path == "/api/derivatives-regime":
             payload = derivatives_regime_module.get_derivatives_regime()
@@ -11635,6 +12990,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     payload["decision_data_quality"] = context.get("data_quality") or {}
             self._send_json(payload)
             return
+        if parsed.path == "/api/breakeven":
+            query = parse_qs(parsed.query)
+            force = str((query.get("refresh") or [""])[0]).lower() in ("1", "true", "yes")
+            portfolio_id = str((query.get("portfolio") or [""])[0])
+            try:
+                self._send_json(
+                    get_breakeven_payload(force=force, portfolio_id=portfolio_id)
+                )
+            except PortfolioNotFound as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.NOT_FOUND)
+            return
         if parsed.path == "/api/health":
             self._send_json(get_health_payload())
             return
@@ -11645,6 +13011,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def _read_json_body(self) -> dict[str, Any] | None:
         """Read a small JSON request body; ``None`` signals a handled error."""
 
+        content_type = (
+            str(self.headers.get("Content-Type") or "")
+            .split(";", 1)[0]
+            .strip()
+            .lower()
+        )
+        if content_type != "application/json":
+            self._send_json(
+                {"ok": False, "error": "写请求必须使用 application/json"},
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+            )
+            return None
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -11670,6 +13048,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if not self._is_local_request():
             self._send_json(
                 {"ok": False, "error": "This dashboard accepts loopback requests only."},
+                HTTPStatus.FORBIDDEN,
+            )
+            return False
+        fetch_site = str(self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        origin = str(self.headers.get("Origin") or "").strip()
+        origin_parts = urlparse(origin) if origin else None
+        expected_host = str(self.headers.get("Host") or "").strip().lower()
+        origin_matches = bool(
+            origin_parts
+            and origin_parts.scheme == "http"
+            and origin_parts.netloc.lower() == expected_host
+            and not origin_parts.params
+            and not origin_parts.query
+            and not origin_parts.fragment
+            and origin_parts.path in {"", "/"}
+        )
+        if fetch_site not in {"", "none", "same-origin"} or (origin and not origin_matches):
+            self._send_json(
+                {"ok": False, "error": "写请求必须来自看板同源页面"},
                 HTTPStatus.FORBIDDEN,
             )
             return False
@@ -11785,6 +13182,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # 看板首屏会并发拉二十多个接口（行情、指数分时、逐只持仓分时、K线…），
+    # socketserver 默认的监听队列只有 5，突发连接会被内核直接 RST——浏览器报
+    # ERR_CONNECTION_RESET，页面提示"无法连接本地服务"，悬浮 K 线因此经常
+    # 加载失败或空白。放宽 backlog 到 128，突发请求排队而不是被拒。
+    request_queue_size = 128
 
 
 def main() -> None:

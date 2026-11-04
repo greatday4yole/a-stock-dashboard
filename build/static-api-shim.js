@@ -174,6 +174,7 @@
       case "opportunities": return "opportunities";
       case "rebalance": return "rebalance";
       case "school-signals": return "school-signals";
+      case "etf-broad-monitor": return "etf-broad-monitor";
       case "intraday-pnl": return "intraday-pnl" + suffix;
       case "intraday-pnl/dates": return "intraday-pnl-dates" + suffix;
       case "intraday-pnl/history": {

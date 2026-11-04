@@ -75,7 +75,7 @@ def tencent_from_canonical(symbol: str) -> str:
 
 
 def collect_symbols(quotes: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Return (position/chart symbols, index/global chart symbols)."""
+    """Return (position symbols, index/global/watchlist-only chart symbols)."""
     canonical: list[str] = []
     for row in quotes.get("positions") or []:
         if not isinstance(row, dict):
@@ -92,6 +92,17 @@ def collect_symbols(quotes: dict[str, Any]) -> tuple[list[str], list[str]]:
             symbol = str(row.get("symbol") or "").strip()
             if symbol and symbol not in chart_only:
                 chart_only.append(symbol)
+    for row in quotes.get("watchlist") or []:
+        if not isinstance(row, dict):
+            continue
+        symbol = canonical_from_tencent(str(row.get("symbol") or row.get("thscode") or ""))
+        if (
+            symbol
+            and tencent_from_canonical(symbol)
+            and symbol not in canonical
+            and symbol not in chart_only
+        ):
+            chart_only.append(symbol)
     return canonical, chart_only
 
 
@@ -205,6 +216,7 @@ def main() -> int:
     save("opportunities", "/api/opportunities", timeout=120)
     save("rebalance", "/api/rebalance", timeout=120)
     save("school-signals", "/api/school-signals", timeout=120)
+    save("etf-broad-monitor", "/api/etf-broad-monitor", timeout=120)
     if not args.fast:
         save("leading-indicators", "/api/leading-indicators", timeout=120)
         save("derivatives-regime", "/api/derivatives-regime", timeout=120)

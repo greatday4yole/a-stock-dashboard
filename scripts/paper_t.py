@@ -292,7 +292,10 @@ def session_summary(
     """
 
     forward = str(direction) == "forward"
+    first_leg = "buy" if forward else "sell"
+    second_leg = "sell" if forward else "buy"
     meta: Dict[str, Any] = {}
+    fills: List[Dict[str, Any]] = []
     sells: List[Dict[str, Any]] = []
     buys: List[Dict[str, Any]] = []
     voided = False
@@ -315,7 +318,9 @@ def session_summary(
                 "price": record.get("price"),
                 "notional": record.get("notional"),
                 "fees": record.get("fees"),
+                "event_id": record.get("event_id"),
             }
+            fills.append(row)
             (sells if record.get("leg") == "sell" else buys).append(row)
         elif event == "void":
             voided = True
@@ -323,32 +328,85 @@ def session_summary(
     sell_notional = round(sum(float(row["notional"] or 0.0) for row in sells), 2)
     buy_notional = round(sum(float(row["notional"] or 0.0) for row in buys), 2)
     fees = round(sum(float(row["fees"] or 0.0) for row in sells + buys), 2)
-    # 逐股配对（同一天同一代码两腿都有）：只有配对成功的部分才算已实现盈亏。
-    # 反T：卖出在前、买回在后 → 盈亏 = 卖出额 − 买回额 − 费用。
-    # 正T：买入在前、卖出在后 → 盈亏 = 卖出额 − 买入额 − 费用。
-    sell_by_symbol: Dict[str, Dict[str, Any]] = {}
-    for row in sells:
-        sell_by_symbol.setdefault(str(row["symbol"]), row)
-    buy_by_symbol: Dict[str, Dict[str, Any]] = {}
-    for row in buys:
-        buy_by_symbol.setdefault(str(row["symbol"]), row)
+
+    # Match actual quantities in ledger order.  A second-leg fill may consume
+    # several first-leg partial fills, but it can never consume a future fill.
+    # Notional and the already-rounded cash fee of each fill are prorated by
+    # matched shares, so matched + remaining accounting always adds back to the
+    # original fill rather than charging an entire order fee to one fragment.
+    fills_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    for row in fills:
+        fills_by_symbol.setdefault(str(row.get("symbol") or ""), []).append(row)
+    remaining_sell_map: Dict[str, Dict[str, Any]] = {}
+    remaining_buy_map: Dict[str, Dict[str, Any]] = {}
+    unmatched_symbols: set = set()
+    errors: List[str] = []
+
+    def add_remaining(row: Mapping[str, Any], shares: int) -> None:
+        if shares <= 0:
+            return
+        target = remaining_sell_map if row.get("leg") == "sell" else remaining_buy_map
+        symbol = str(row.get("symbol") or "")
+        item = target.setdefault(
+            symbol,
+            {"symbol": symbol, "name": row.get("name"), "leg": row.get("leg"), "shares": 0},
+        )
+        item["shares"] += shares
+        unmatched_symbols.add(symbol)
+
     matched_cny = 0.0
     matched_count = 0
-    unmatched_symbols: List[str] = []
-    for symbol in set(sell_by_symbol) | set(buy_by_symbol):
-        sell_row = sell_by_symbol.get(symbol)
-        buy_row = buy_by_symbol.get(symbol)
-        if sell_row is None or buy_row is None:
-            # 只有一腿：仍是敞口，不是已实现盈亏。
-            unmatched_symbols.append(symbol)
-            continue
-        matched_cny += (
-            float(sell_row["notional"] or 0.0)
-            - float(buy_row["notional"] or 0.0)
-            - float(sell_row["fees"] or 0.0)
-            - float(buy_row["fees"] or 0.0)
-        )
-        matched_count += 1
+    for symbol, symbol_fills in fills_by_symbol.items():
+        first_lots: List[Dict[str, Any]] = []
+        symbol_matched = 0
+        saw_first_leg = False
+        for row in symbol_fills:
+            shares = int(row.get("shares") or 0)
+            if shares <= 0:
+                errors.append(f"{symbol} fill has invalid quantity")
+                continue
+            if row.get("leg") == first_leg:
+                saw_first_leg = True
+                first_lots.append({"row": row, "remaining": shares})
+                continue
+            second_remaining = shares
+            while second_remaining > 0 and first_lots:
+                lot = first_lots[0]
+                matched = min(second_remaining, int(lot["remaining"]))
+                first = lot["row"]
+                first_shares = int(first.get("shares") or 0)
+                second_shares = int(row.get("shares") or 0)
+                first_fraction = matched / first_shares
+                second_fraction = matched / second_shares
+                first_notional = float(first.get("notional") or 0.0) * first_fraction
+                second_notional = float(row.get("notional") or 0.0) * second_fraction
+                first_fees = float(first.get("fees") or 0.0) * first_fraction
+                second_fees = float(row.get("fees") or 0.0) * second_fraction
+                sell_notional_part = second_notional if forward else first_notional
+                buy_notional_part = first_notional if forward else second_notional
+                matched_cny += (
+                    sell_notional_part - buy_notional_part - first_fees - second_fees
+                )
+                symbol_matched += matched
+                lot["remaining"] = int(lot["remaining"]) - matched
+                second_remaining -= matched
+                if int(lot["remaining"]) == 0:
+                    first_lots.pop(0)
+            if second_remaining > 0:
+                if saw_first_leg:
+                    errors.append(
+                        f"{symbol} {second_leg} quantity exceeds prior {first_leg} "
+                        f"quantity by {second_remaining} shares"
+                    )
+                add_remaining(row, second_remaining)
+        if symbol_matched:
+            matched_count += 1
+        for lot in first_lots:
+            add_remaining(lot["row"], int(lot["remaining"]))
+
+    remaining_sells = list(remaining_sell_map.values())
+    remaining_buys = list(remaining_buy_map.values())
+    remaining_first = remaining_buys if forward else remaining_sells
     matched_cny = round(matched_cny, 2)
     mv = float(meta.get("mv") or 0.0)
     realized_cny: Optional[float] = None
@@ -356,18 +414,17 @@ def session_summary(
     leg = "idle"
     if voided:
         leg = "voided"
-    elif sells and buys:
-        # 两腿都有：已完成一轮 T。未配对的敞口不计入已实现盈亏。
+    elif errors:
+        leg = "error"
+    elif remaining_first:
+        leg = "bought" if forward else "sold"
+    elif matched_count:
         leg = "done"
-        if matched_count:
-            realized_cny = matched_cny
-            if mv > 0:
-                realized_bp = round(realized_cny / mv * 10000.0, 1)
-    elif sells and not forward:
-        leg = "sold"
-    elif buys and forward:
-        leg = "bought"
-    opened_at = (sells or buys or [{}])[0].get("ts") if (sells or buys) else None
+    if not voided and not errors and matched_count:
+        realized_cny = matched_cny
+        if mv > 0:
+            realized_bp = round(realized_cny / mv * 10000.0, 1)
+    opened_at = fills[0].get("ts") if fills else None
     return {
         "exists": bool(records),
         "leg": leg,
@@ -387,6 +444,9 @@ def session_summary(
         "matched_cny": matched_cny if matched_count else None,
         "unmatched_count": len(unmatched_symbols),
         "unmatched_symbols": sorted(unmatched_symbols),
+        "remaining_sells": remaining_sells,
+        "remaining_buys": remaining_buys,
+        "errors": errors,
         "realized_cny": realized_cny,
         "realized_bp": realized_bp,
         "sells": sells,
@@ -435,7 +495,7 @@ def _reject_reason(action: str, phase: str, summary: Mapping[str, Any]) -> str:
 
 
 def fill_event(row: Mapping[str, Any], ts_iso: str) -> Dict[str, Any]:
-    return {
+    event = {
         "event": "fill",
         "leg": str(row["action"]),
         "symbol": str(row["symbol"]),
@@ -446,6 +506,9 @@ def fill_event(row: Mapping[str, Any], ts_iso: str) -> Dict[str, Any]:
         "fees": leg_fees(str(row["symbol"]), str(row["action"]), float(row["notional"])),
         "ts": ts_iso,
     }
+    if row.get("event_id"):
+        event["event_id"] = str(row["event_id"])
+    return event
 
 
 def close_event(summary: Mapping[str, Any], ts_iso: str) -> Dict[str, Any]:

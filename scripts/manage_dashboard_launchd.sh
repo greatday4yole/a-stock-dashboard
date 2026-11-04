@@ -189,7 +189,7 @@ wait_for_health() {
   local health_payload=""
   while [ "$attempts" -lt "$HEALTH_CHECK_MAX_ATTEMPTS" ]; do
     if service_owns_listener; then
-      if health_payload="$(fetch_health_payload 2 2>/dev/null)" \
+      if health_payload="$(fetch_health_payload 8 2>/dev/null)" \
         && health_payload_is_compatible <<< "$health_payload"; then
         return 0
       fi
@@ -319,7 +319,7 @@ show_status() {
     pid="$(service_pid)"
     [ -n "$pid" ] || pid="starting"
   fi
-  if health_payload="$(fetch_health_payload 3 2>/dev/null)"; then
+  if health_payload="$(fetch_health_payload 12 2>/dev/null)"; then
     endpoint="yes"
     if health_payload_is_compatible <<< "$health_payload"; then
       runtime_compatible="yes"

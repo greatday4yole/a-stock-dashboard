@@ -45,6 +45,9 @@ jobs:
       - name: Install runtime dependencies
         run: pip install -r requirements-ci.txt
 
+      - name: Test static exporter
+        run: python -m unittest discover -s tests -v
+
       - name: Restore previous encrypted snapshot
         uses: actions/cache/restore@v4
         with:

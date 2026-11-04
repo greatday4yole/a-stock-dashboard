@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>盘中当日盈亏</title>
+  <link rel="stylesheet" href="/widget.css">
+</head>
+<body>
+  <main class="widget-shell drag-region" aria-label="盘中当日盈亏桌面组件">
+    <header class="widget-header drag-region">
+      <div class="widget-title">
+        <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+        <h1 id="widget-title">1020</h1>
+      </div>
+      <div class="header-actions">
+        <button id="pin-toggle" class="icon-button no-drag" type="button" aria-label="取消置顶" aria-pressed="true" title="取消置顶">
+          <svg class="pin-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 17v5"/>
+            <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>
+          </svg>
+        </button>
+        <button id="amount-toggle" class="icon-button no-drag" type="button" aria-label="隐藏金额" aria-pressed="false" title="隐藏金额">
+          <svg class="eye eye-open" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M1.4 8C2.8 5.1 5.2 3.4 8 3.4s5.2 1.7 6.6 4.6C13.2 10.9 10.8 12.6 8 12.6S2.8 10.9 1.4 8Z"/>
+            <circle cx="8" cy="8" r="2.1"/>
+          </svg>
+          <svg class="eye eye-closed" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M2.2 7.2C3.5 9.4 5.6 10.8 8 10.8s4.5-1.4 5.8-3.6"/>
+            <path d="M4.4 9.6 3.2 11.4M8 10.9v2M11.6 9.6l1.2 1.8"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <section class="summary drag-region" aria-label="最新盈亏">
+      <div class="amount-row">
+        <div class="amount-wrap">
+          <strong id="latest-amount" class="amount flat">--</strong>
+          <span id="amount-unit" class="amount-unit">元</span>
+        </div>
+      </div>
+      <label class="visually-hidden" for="symbol-selector">选择盈亏曲线</label>
+      <select id="symbol-selector" class="symbol-selector no-drag" aria-label="选择盈亏曲线">
+        <option value="total">全部持仓合计</option>
+      </select>
+    </section>
+
+    <section id="chart-wrap" class="chart-wrap" aria-label="当日盈亏走势">
+      <svg id="pnl-chart" class="pnl-chart" viewBox="0 0 180 64" preserveAspectRatio="none" role="img" aria-label="盘中当日盈亏走势" hidden></svg>
+      <div id="empty-state" class="empty-state" role="status">正在获取盘中盈亏轨迹…</div>
+      <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden>
+        <span id="tooltip-time">--</span>
+        <strong id="tooltip-value">--</strong>
+      </div>
+    </section>
+
+    <footer class="widget-footer">
+      <span id="data-meta">等待盘中数据</span>
+      <span id="refresh-meta">自动刷新</span>
+    </footer>
+    <div class="resize-handle" data-direction="n" aria-hidden="true"></div>
+    <div class="resize-handle" data-direction="s" aria-hidden="true"></div>
+    <div class="resize-handle" data-direction="e" aria-hidden="true"></div>
+    <div class="resize-handle" data-direction="w" aria-hidden="true"></div>
+    <div class="resize-handle" data-direction="nw" aria-hidden="true"></div>
+    <div class="resize-handle" data-direction="ne" aria-hidden="true"></div>
+    <div class="resize-handle" data-direction="sw" aria-hidden="true"></div>
+    <div class="resize-handle" data-direction="se" aria-hidden="true"><span class="resize-grip"></span></div>
+  </main>
+  <script src="/widget.js"></script>
+</body>
+</html>

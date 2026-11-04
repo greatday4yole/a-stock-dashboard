@@ -458,17 +458,44 @@ def _symbol_leg_map(summary: Mapping[str, Any], *, direction: str = "reverse") -
 
     forward = str(direction) == "forward"
     legs: Dict[str, str] = {}
-    if forward:
-        for row in summary.get("buys") or []:
-            legs[str(row.get("symbol"))] = "bought"
-        for row in summary.get("sells") or []:
+    first_rows = summary.get("buys") if forward else summary.get("sells")
+    second_rows = summary.get("sells") if forward else summary.get("buys")
+    remaining_rows = summary.get("remaining_buys") if forward else summary.get("remaining_sells")
+    if remaining_rows is None:  # compatibility with manually constructed summaries
+        for row in first_rows or []:
+            legs[str(row.get("symbol"))] = "bought" if forward else "sold"
+        for row in second_rows or []:
             legs[str(row.get("symbol"))] = "done"
         return legs
-    for row in summary.get("sells") or []:
-        legs[str(row.get("symbol"))] = "sold"
-    for row in summary.get("buys") or []:
+    for row in first_rows or []:
         legs[str(row.get("symbol"))] = "done"
+    for row in remaining_rows or []:
+        legs[str(row.get("symbol"))] = "bought" if forward else "sold"
     return legs
+
+
+def _auto_session_event_id(store: PaperTStore, trade_date: date_type, event: str) -> str:
+    return f"auto:{store.data_dir.name}:{trade_date.isoformat()}:{event}"
+
+
+def _auto_fill_event_id(
+    store: PaperTStore,
+    trade_date: date_type,
+    signal: Mapping[str, Any],
+    action: str,
+    symbol: str,
+    direction: str,
+) -> str:
+    forward = str(direction) == "forward"
+    first_leg = (forward and action == "buy") or (not forward and action == "sell")
+    point = signal.get("entry") if first_leg else signal.get("exit")
+    if not isinstance(point, Mapping):
+        point = {}
+    anchor = str(point.get("time") or ("entry" if first_leg else "session-close"))
+    return (
+        f"auto:{store.data_dir.name}:{trade_date.isoformat()}:"
+        f"{anchor}:{action}:{symbol}"
+    )
 
 
 def _execute_agg_leg(
@@ -498,6 +525,7 @@ def _execute_agg_leg(
                 trade_date,
                 {
                     "event": "session_open",
+                    "event_id": _auto_session_event_id(store, trade_date, "session_open"),
                     "mode": "full",
                     "th_bp": signal.get("th_bp"),
                     "mv": round(mv, 0),
@@ -506,18 +534,42 @@ def _execute_agg_leg(
                 now,
             )
         for row in plan["rows"]:
+            row = {
+                **row,
+                "event_id": _auto_fill_event_id(
+                    store, trade_date, signal, "sell", str(row["symbol"]), "reverse"
+                ),
+            }
             store.append(trade_date, paper_t_module.fill_event(row, ts_iso), now)
         return {
             "action": "sell",
             "note": f"已自动卖出 {plan['count']} 笔 ≈ {plan['total_notional']:,.0f} 元（全篮子），等待买回信号",
         }
-    plan = paper_t_module.buy_rows_from_fills(summary.get("sells") or [], prices)
+    remaining_sells = summary.get("remaining_sells")
+    if remaining_sells is None:  # compatibility with manually constructed summaries
+        remaining_sells = summary.get("sells") or []
+    plan = paper_t_module.buy_rows_from_fills(remaining_sells, prices)
     if not plan["rows"]:
         return None
     for row in plan["rows"]:
+        row = {
+            **row,
+            "event_id": _auto_fill_event_id(
+                store, trade_date, signal, "buy", str(row["symbol"]), "reverse"
+            ),
+        }
         store.append(trade_date, paper_t_module.fill_event(row, ts_iso), now)
     updated = paper_t_module.session_summary(store.read_day(trade_date))
-    store.append(trade_date, paper_t_module.close_event(updated, ts_iso), now)
+    if updated.get("errors") or updated.get("leg") != "done":
+        raise paper_t_module.PaperTActionError("买回后仍有未配对或超量成交，冻结当日自动执行")
+    store.append(
+        trade_date,
+        {
+            **paper_t_module.close_event(updated, ts_iso),
+            "event_id": _auto_session_event_id(store, trade_date, "session_close"),
+        },
+        now,
+    )
     realized = updated.get("realized_cny")
     realized_bp = updated.get("realized_bp")
     realized_text = f"{realized:+,.0f} 元" if isinstance(realized, (int, float)) else "--"
@@ -544,9 +596,12 @@ def _execute_stock_legs(
     ts_iso = now.isoformat(timespec="seconds")
     forward = str(direction) == "forward"
     legs = _symbol_leg_map(summary, direction=direction)
-    # 反T 的第二腿买回量来自卖出腿；正T 的第二腿卖出量来自买入腿。
+    # 第二腿只来自尚未配对的第一腿余量，不能把已配对成交再次执行。
     first_leg_rows = list(summary.get("buys") or []) if forward else list(summary.get("sells") or [])
-    first_leg_by_symbol = {str(row.get("symbol")): row for row in first_leg_rows}
+    remaining_first_rows = summary.get("remaining_buys") if forward else summary.get("remaining_sells")
+    if remaining_first_rows is None:  # compatibility with manually constructed summaries
+        remaining_first_rows = first_leg_rows
+    first_leg_by_symbol = {str(row.get("symbol")): row for row in remaining_first_rows}
     sold_count = 0
     bought_count = 0
     acted: List[str] = []
@@ -581,6 +636,7 @@ def _execute_stock_legs(
                     trade_date,
                     {
                         "event": "session_open",
+                        "event_id": _auto_session_event_id(store, trade_date, "session_open"),
                         "mode": "sample",
                         "th_bp": signal.get("th_bp"),
                         "mv": round(mv, 0),
@@ -590,6 +646,12 @@ def _execute_stock_legs(
                 )
                 records = store.read_day(trade_date)
             for row in plan["rows"]:
+                row = {
+                    **row,
+                    "event_id": _auto_fill_event_id(
+                        store, trade_date, signal, "sell", symbol, direction
+                    ),
+                }
                 store.append(trade_date, paper_t_module.fill_event(row, ts_iso), now)
             sold_count += 1
             acted.append(symbol)
@@ -609,6 +671,7 @@ def _execute_stock_legs(
                     trade_date,
                     {
                         "event": "session_open",
+                        "event_id": _auto_session_event_id(store, trade_date, "session_open"),
                         "mode": "sample",
                         "th_bp": signal.get("th_bp"),
                         "mv": round(mv, 0),
@@ -618,6 +681,12 @@ def _execute_stock_legs(
                 )
                 records = store.read_day(trade_date)
             for row in plan["rows"]:
+                row = {
+                    **row,
+                    "event_id": _auto_fill_event_id(
+                        store, trade_date, signal, "buy", symbol, direction
+                    ),
+                }
                 store.append(trade_date, paper_t_module.fill_event(row, ts_iso), now)
             bought_count += 1
             acted.append(symbol)
@@ -674,6 +743,9 @@ def run_all_strategies(
                 continue
             summary = paper_t_module.session_summary(records, direction=strategy.direction)
             if summary.get("voided"):
+                continue
+            if summary.get("errors"):
+                _log(f"[{strategy.id}] 成交数量配对异常，冻结当日自动执行：{summary['errors'][0]}")
                 continue
             if strategy.kind == "agg":
                 if strategy.direction != "reverse":
@@ -908,7 +980,7 @@ def compare_payload(*, window_days: int = _COMPARE_WINDOW_DAYS, now: Optional[da
             )
             realized = summary.get("realized_cny")
             realized_bp = summary.get("realized_bp")
-            if realized is None and summary.get("matched_cny") is not None:
+            if realized is None and not summary.get("errors") and summary.get("matched_cny") is not None:
                 realized = summary["matched_cny"]
             mv = summary.get("mv")
             if realized is not None and realized_bp is None and isinstance(mv, (int, float)) and mv > 0:

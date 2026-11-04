@@ -22,9 +22,15 @@ import json
 import os
 import re
 import threading
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Iterator, List, Mapping, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
 
 SCHEMA_VERSION = "paper-t-ledger.v1"
 DEFAULT_DATA_DIR = Path("data/paper-trading")
@@ -53,6 +59,34 @@ def _record_hash(record: Mapping[str, Any]) -> str:
     unsigned = dict(record)
     unsigned.pop("record_hash", None)
     return _sha256_document(unsigned)
+
+
+@contextmanager
+def _interprocess_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
+    """Serialize ledger access across processes, not just store instances."""
+
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        else:  # pragma: no cover - exercised on Windows
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            else:  # pragma: no cover - exercised on Windows
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
@@ -88,6 +122,7 @@ def _decode_ledger(raw: bytes, expected_date: date) -> List[Dict[str, Any]]:
         # otherwise lose every remaining session of that trading day.
         lines = lines[:-1]
     records: List[Dict[str, Any]] = []
+    seen_event_ids: Dict[str, int] = {}
     previous_hash = GENESIS_HASH
     previous_at: Optional[datetime] = None
     for line_number, line in enumerate(lines, 1):
@@ -115,6 +150,16 @@ def _decode_ledger(raw: bytes, expected_date: date) -> List[Dict[str, Any]]:
         event = str(value.get("event") or "")
         if event not in _KNOWN_EVENTS:
             raise PaperTIntegrityError(f"unknown event at ledger line {line_number}")
+        event_id = value.get("event_id")
+        if event_id is not None:
+            if not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 240:
+                raise PaperTIntegrityError(f"invalid event id at ledger line {line_number}")
+            if event_id in seen_event_ids:
+                raise PaperTIntegrityError(
+                    f"duplicate event id at ledger line {line_number} "
+                    f"(first seen at {seen_event_ids[event_id]})"
+                )
+            seen_event_ids[event_id] = line_number
         stamp = _parse_ts(value.get("ts"))
         if stamp is None:
             raise PaperTIntegrityError(f"invalid ts at ledger line {line_number}")
@@ -187,48 +232,85 @@ class PaperTStore:
             handle.flush()
             os.fsync(handle.fileno())
 
+    def _read_day_locked(self, trade_date: date) -> List[Dict[str, Any]]:
+        path = self.path_for(trade_date)
+        if not path.exists():
+            return []
+        raw = path.read_bytes()
+        if len(raw) > MAX_LEDGER_BYTES:
+            raise PaperTIntegrityError("paper-t ledger is unexpectedly large")
+        return _decode_ledger(raw, trade_date)
+
     def read_day(self, trade_date: date) -> List[Dict[str, Any]]:
         path = self.path_for(trade_date)
         with self._lock_for(path):
             if not path.exists():
                 return []
-            raw = path.read_bytes()
-        if len(raw) > MAX_LEDGER_BYTES:
-            raise PaperTIntegrityError("paper-t ledger is unexpectedly large")
-        return _decode_ledger(raw, trade_date)
+            with _interprocess_lock(path, exclusive=False):
+                return self._read_day_locked(trade_date)
+
+    @staticmethod
+    def _idempotent_existing(
+        existing: List[Dict[str, Any]], event: Mapping[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        event_id = event.get("event_id")
+        if event_id is None:
+            return None
+        metadata = {
+            "schema_version", "trade_date", "sequence", "ts",
+            "previous_record_hash", "record_hash",
+        }
+        expected = {key: value for key, value in event.items() if key != "ts"}
+        for record in existing:
+            if record.get("event_id") != event_id:
+                continue
+            actual = {key: value for key, value in record.items() if key not in metadata}
+            if actual != expected:
+                raise PaperTIntegrityError(f"conflicting payload for event id: {event_id}")
+            return record
+        return None
 
     def append(self, trade_date: date, event: Mapping[str, Any], ts: datetime) -> Dict[str, Any]:
-        """Append one event atomically under the per-day lock; returns the record."""
+        """Append once per event id under thread and inter-process day locks."""
 
         if str(event.get("event") or "") not in _KNOWN_EVENTS:
             raise ValueError(f"unknown paper-t event: {event.get('event')!r}")
+        event_id = event.get("event_id")
+        if event_id is not None and (
+            not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 240
+        ):
+            raise ValueError("paper-t event_id must be a non-empty string of at most 240 chars")
         stamp = ts if ts.tzinfo else ts.astimezone()
         path = self.path_for(trade_date)
         with self._lock_for(path):
-            self._truncate_torn_tail(path)
-            existing = self.read_day(trade_date)
-            if existing:
-                last_ts = _parse_ts(existing[-1].get("ts"))
-                if last_ts is not None and stamp < last_ts:
-                    raise ValueError("paper-t ledger ts must be non-decreasing")
-            sequence = len(existing) + 1
-            record: Dict[str, Any] = {
-                "schema_version": SCHEMA_VERSION,
-                "trade_date": trade_date.isoformat(),
-                "sequence": sequence,
-                "event": str(event["event"]),
-                "ts": stamp.isoformat(timespec="seconds"),
-                **{key: value for key, value in event.items() if key != "event"},
-                "previous_record_hash": (
-                    str(existing[-1]["record_hash"]) if existing else GENESIS_HASH
-                ),
-            }
-            record["record_hash"] = _record_hash(record)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as handle:
-                handle.write(_canonical_json(record) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            with _interprocess_lock(path, exclusive=True):
+                self._truncate_torn_tail(path)
+                existing = self._read_day_locked(trade_date)
+                committed = self._idempotent_existing(existing, event)
+                if committed is not None:
+                    return committed
+                if existing:
+                    last_ts = _parse_ts(existing[-1].get("ts"))
+                    if last_ts is not None and stamp < last_ts:
+                        raise ValueError("paper-t ledger ts must be non-decreasing")
+                sequence = len(existing) + 1
+                record: Dict[str, Any] = {
+                    "schema_version": SCHEMA_VERSION,
+                    "trade_date": trade_date.isoformat(),
+                    "sequence": sequence,
+                    "event": str(event["event"]),
+                    "ts": stamp.isoformat(timespec="seconds"),
+                    **{key: value for key, value in event.items() if key != "event"},
+                    "previous_record_hash": (
+                        str(existing[-1]["record_hash"]) if existing else GENESIS_HASH
+                    ),
+                }
+                record["record_hash"] = _record_hash(record)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(_canonical_json(record) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
         return record
 
     def list_dates(self) -> List[str]:

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>持仓行情</title>
-    <link rel="stylesheet" href="/styles.css?v=20261020b" />
+    <link rel="stylesheet" href="/styles.css?v=20261103a" />
   </head>
   <body>
     <div class="app-shell">
@@ -41,7 +41,65 @@
         <div id="portfolio-tab-note" class="portfolio-tab-note muted" hidden></div>
 
         <div id="portfolio-view">
-        <section class="panel summary-panel" aria-labelledby="summary-heading">
+        <nav id="section-nav" class="section-nav" aria-label="页面分区快捷导航">
+          <a href="#market-panel">市场</a>
+          <a href="#summary-panel">摘要</a>
+          <a href="#positions-panel">持仓</a>
+          <a href="#intraday-history-panel">历史分时</a>
+          <a href="#daily-pnl-history-panel">每日盈亏</a>
+          <a href="#risk-panel">风险</a>
+          
+          <a href="#t-center-panel">做T</a>
+        </nav>
+        <section id="market-panel" class="panel market-panel" aria-labelledby="market-heading">
+          <div class="section-heading">
+            <h2 id="market-heading">主要市场</h2>
+            <div id="quote-source" class="source-line">行情源 --</div>
+          </div>
+          <div id="market-grid" class="market-grid" aria-live="polite">
+            <div class="empty compact">正在获取市场行情…</div>
+          </div>
+          <div class="overnight-block">
+            <div class="subheading">隔夜全球标的 <span class="muted">按市场时区分组（含与北京时间时差） · 存储、半导体、芯片标的已并入 · ★ 为 AI/存储核心或与持仓高相关 · 悬浮查看高亮原因与K线</span></div>
+            <div id="overnight-grid" class="overnight-groups">
+              <span class="muted">等待数据</span>
+            </div>
+          </div>
+          <div class="leading-block">
+            <div class="subheading">先行指标 <span id="leading-meta" class="muted">等待数据</span></div>
+            <div id="leading-grid" class="leading-grid" aria-live="polite">
+              <span class="muted">等待数据</span>
+            </div>
+          </div>
+          <div class="market-lower">
+            <div>
+              <div class="subheading">市场广度</div>
+              <div id="breadth-grid" class="breadth-grid">
+                <span class="muted">等待数据</span>
+              </div>
+            </div>
+            <div>
+              <div class="subheading">宽基ETF监控 <span class="muted">四只核心宽基ETF 分时走势 · 重点关注成交量变化（量较昨日全天）</span> <span id="etf-broad-meta" class="muted"></span></div>
+              <div id="etf-broad-grid" class="etf-broad-grid">
+                <span class="muted">等待数据</span>
+              </div>
+            </div>
+          </div>
+          <div class="market-news-section" aria-labelledby="market-news-heading">
+            <div class="market-news-heading">
+              <div class="market-news-title-line">
+                <h3 id="market-news-heading">市场快讯</h3>
+                <span id="market-news-state" class="market-news-state is-loading">加载中</span>
+              </div>
+              <span id="market-news-meta" class="market-news-meta">财联社 / 东方财富 / Google 新闻 · --</span>
+            </div>
+            <div id="market-news-list" class="market-news-list" aria-live="polite">
+              <div class="empty compact market-news-empty">正在获取全市场快讯…</div>
+            </div>
+          </div>
+        </section>
+
+        <section id="summary-panel" class="panel summary-panel" aria-labelledby="summary-heading">
           <div class="section-heading">
             <h2 id="summary-heading">组合摘要</h2>
             <span id="portfolio-coverage" class="muted">报价覆盖 --</span>
@@ -53,6 +111,24 @@
             <div class="summary-item"><span>股票敞口</span><strong>--</strong></div>
           </div>
           <p class="summary-note">数量、现金和负债来自注明日期的本地账户快照；仅价格盘中更新，不代表券商当前持仓或结算值。</p>
+        </section>
+
+        <section class="panel breakeven-panel" aria-labelledby="breakeven-heading">
+          <div class="section-heading">
+            <h2 id="breakeven-heading">回本可行性</h2>
+            <span id="breakeven-meta" class="muted">等待测算</span>
+          </div>
+          <div id="breakeven-summary" class="breakeven-summary">
+            <div class="summary-item"><span>回本目标（经济成本）</span><strong>--</strong></div>
+            <div class="summary-item"><span>当前净权益</span><strong>--</strong></div>
+            <div class="summary-item"><span>需上涨</span><strong>--</strong></div>
+            <div class="summary-item"><span>组合年化波动</span><strong>--</strong></div>
+          </div>
+          <p id="breakeven-alert" class="breakeven-alert" role="status" hidden></p>
+          <div id="breakeven-scenarios" class="breakeven-scenarios"></div>
+          <div id="breakeven-timeline" class="breakeven-timeline"></div>
+          <div id="breakeven-positions" class="breakeven-positions"></div>
+          <p id="breakeven-note" class="breakeven-note">概率基于几何布朗运动模拟，会低估厚尾风险；仅为量级参考，不构成投资建议，也不改变任何风控门禁。</p>
         </section>
 
         <section class="panel intraday-pnl-panel" aria-labelledby="intraday-pnl-heading">
@@ -81,10 +157,45 @@
           <p id="intraday-pnl-note" class="intraday-pnl-note">曲线仅使用接口返回的真实盘中点位，不对缺失时段插值。</p>
         </section>
 
+        <section id="positions-panel" class="panel positions-panel" aria-labelledby="positions-heading">
+            <div class="section-heading">
+              <h2 id="positions-heading">持仓行情 <span id="positions-count" class="count-label">--</span></h2>
+              <span id="positions-account-state" class="muted">账户快照待核验 · 股票名看图</span>
+            </div>
+            <div class="table-wrap">
+              <table id="positions-table" class="positions-table">
+                <thead>
+                  <tr>
+                    <th scope="col">代码 / 名称</th>
+                    <th scope="col" title="当日分时走势（5分钟K线，午休压缩）">分时</th>
+                    <th scope="col">行业</th>
+                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="price">现价<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="changePct">当日%<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                    <th scope="col" class="numeric sortable-column" aria-sort="ascending" title="按快照数量与当日价格变化估算"><button class="table-sort-button" type="button" data-sort-key="dayPnl">当日涨跌金额<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                    <th scope="col" title="本地规则引擎：大跌/大涨 · PE·PB 高估或低估 · 权重超标 · 放量异动 · 自设线触发；连跌/MA20/回撤等需历史积累的规则未启用">信号</th>
+                    <th scope="col" title="三大流派（趋势跟踪 / 道氏理论 / 量价分析）在该股上的持仓状态，下方标注判断时刻；悬停芯片查看流派提示与所依据的日K日期。仅重仓股有流派信号。">流派信号<span id="school-header-time" class="header-sub"></span></th>
+                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="turnover">换手%<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="pe">PE<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="pb">PB<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                    <th scope="col" class="news-column" title="该股重要新闻的日期；红色=好消息、黑色=中性、绿色=坏消息。点击日期查看当天全部标题">重要新闻</th>
+                    <th scope="col" title="最新财报（东财业绩报表，累计口径）：报告期 / 营收及同比 / 归母净利及同比 / 毛利·ROE / EPS·机构数。未披露显示“三季报未披露”，不拿中报顶替">最新财报</th>
+                    <th scope="col" class="numeric sortable-column" aria-sort="none" title="默认显示占证券总市值权重；净权益权重在次行提示"><button class="table-sort-button" type="button" data-sort-key="weight">权重%<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="marketValue">市值<span class="sort-indicator" aria-hidden="true"></span></button></th>
+                    <th scope="col" title="自设止损/加仓/止盈价格线，末列 ⚙ 可设置">自设线</th>
+                    <th scope="col"><span class="visually-hidden">设置自设价格线</span></th>
+                  </tr>
+                </thead>
+                <tbody id="positions-body">
+                  <tr><td colspan="17" class="empty">正在获取持仓行情…</td></tr>
+                </tbody>
+              </table>
+            </div>
+        </section>
+
         <section class="panel personal-index-panel" aria-labelledby="personal-index-heading">
           <div class="section-heading personal-index-heading">
             <div class="personal-index-title-line">
-              <h2 id="personal-index-heading">个人指数日K线</h2>
+              <h2 id="personal-index-heading">个人指数K线</h2>
               <strong id="personal-index-latest" class="personal-index-latest flat">--</strong>
               <span id="personal-index-change" class="personal-index-change muted">较基准 --</span>
             </div>
@@ -108,7 +219,7 @@
             <span class="personal-index-metric">当日盈亏: <strong id="personal-index-today-pnl">--</strong></span>
           </div>
           <div class="personal-index-chart-wrap">
-            <div id="personal-index-chart" class="personal-index-chart" role="img" aria-label="个人指数日K线与当日盈亏柱状图" aria-describedby="personal-index-note"></div>
+            <div id="personal-index-chart" class="personal-index-chart" role="img" aria-label="个人指数K线与成交量" aria-describedby="personal-index-note"></div>
             <div id="personal-index-empty" class="personal-index-empty" role="status" aria-live="polite">正在获取个人指数K线…</div>
           </div>
           <div class="personal-index-detail">
@@ -135,91 +246,10 @@
               </table>
             </div>
           </div>
-          <p id="personal-index-note" class="personal-index-note">个人指数 = 1000 × (组合当日总市值 ÷ 基准日总市值)，市值加权，16只成分股数量固定；全历史按快照篮子 × 前复权价统一重建，正确处理分红除权，累计盈亏自K线首日起算；收盘后"今日"bar 自动按收盘价修正（scripts/rebuild_personal_index_kline.py 可随时重建历史）。</p>
+          <p id="personal-index-note" class="personal-index-note">个人指数 = 1000 × (组合当日总市值 ÷ 基准日总市值)，市值加权，16只成分股数量固定；全历史按快照篮子 × 前复权价统一重建，正确处理分红除权，累计盈亏自K线首日起算；副图成交量 = Σ(持仓数量 × 当日成交量(手))，量纲为股·手合计，仅供量能对比，不等同成交股数；收盘后"今日"bar 自动按收盘价修正（scripts/rebuild_personal_index_kline.py 可随时重建历史）。</p>
         </section>
 
-        <section class="panel market-panel" aria-labelledby="market-heading">
-          <div class="section-heading">
-            <h2 id="market-heading">主要市场</h2>
-            <div id="quote-source" class="source-line">行情源 --</div>
-          </div>
-          <div id="market-grid" class="market-grid" aria-live="polite">
-            <div class="empty compact">正在获取市场行情…</div>
-          </div>
-          <div class="leading-block">
-            <div class="subheading">先行指标 <span id="leading-meta" class="muted">等待数据</span></div>
-            <div id="leading-grid" class="leading-grid" aria-live="polite">
-              <span class="muted">等待数据</span>
-            </div>
-          </div>
-          <div class="market-lower">
-            <div>
-              <div class="subheading">市场广度</div>
-              <div id="breadth-grid" class="breadth-grid">
-                <span class="muted">等待数据</span>
-              </div>
-            </div>
-            <div>
-              <div class="subheading">全球参考</div>
-              <div id="global-grid" class="global-grid">
-                <span class="muted">等待数据</span>
-              </div>
-            </div>
-          </div>
-          <div class="overnight-block">
-            <div class="subheading">隔夜全球标的 <span class="muted">仅展示与持仓相关度高（|同日相关|≥0.15）的标的 · 悬浮查看相关度与K线</span></div>
-            <div id="overnight-grid" class="overnight-groups">
-              <span class="muted">等待数据</span>
-            </div>
-          </div>
-          <div class="market-news-section" aria-labelledby="market-news-heading">
-            <div class="market-news-heading">
-              <div class="market-news-title-line">
-                <h3 id="market-news-heading">市场快讯</h3>
-                <span id="market-news-state" class="market-news-state is-loading">加载中</span>
-              </div>
-              <span id="market-news-meta" class="market-news-meta">财联社 / 东方财富 / Google 新闻 · --</span>
-            </div>
-            <div id="market-news-list" class="market-news-list" aria-live="polite">
-              <div class="empty compact market-news-empty">正在获取全市场快讯…</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel positions-panel" aria-labelledby="positions-heading">
-            <div class="section-heading">
-              <h2 id="positions-heading">持仓行情 <span id="positions-count" class="count-label">--</span></h2>
-              <span id="positions-account-state" class="muted">账户快照待核验 · 股票名看图 / 行内筛选新闻</span>
-            </div>
-            <div class="table-wrap">
-              <table id="positions-table" class="positions-table">
-                <thead>
-                  <tr>
-                    <th scope="col">代码 / 名称</th>
-                    <th scope="col" title="当日分时走势（5分钟K线，午休压缩）">分时</th>
-                    <th scope="col">行业</th>
-                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="price">现价<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="changePct">当日%<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                    <th scope="col" class="numeric sortable-column" aria-sort="ascending" title="按快照数量与当日价格变化估算"><button class="table-sort-button" type="button" data-sort-key="dayPnl">当日涨跌金额<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                    <th scope="col" title="本地规则引擎：大跌/大涨 · PE·PB 高估或低估 · 权重超标 · 放量异动 · 自设线触发；连跌/MA20/回撤等需历史积累的规则未启用">信号</th>
-                    <th scope="col" title="三大流派（趋势跟踪 / 道氏理论 / 量价分析）在该股上的持仓状态；悬停查看流派提示，重仓股才有流派信号">流派信号</th>
-                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="turnover">换手%<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="pe">PE<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="pb">PB<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                    <th scope="col" class="numeric sortable-column" aria-sort="none" title="默认显示占证券总市值权重；净权益权重在次行提示"><button class="table-sort-button" type="button" data-sort-key="weight">权重%<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                    <th scope="col" class="numeric sortable-column" aria-sort="none"><button class="table-sort-button" type="button" data-sort-key="marketValue">市值<span class="sort-indicator" aria-hidden="true"></span></button></th>
-                    <th scope="col" title="自设止损/加仓/止盈价格线，末列 ⚙ 可设置">自设线</th>
-                    <th scope="col"><span class="visually-hidden">设置自设价格线</span></th>
-                  </tr>
-                </thead>
-                <tbody id="positions-body">
-                  <tr><td colspan="15" class="empty">正在获取持仓行情…</td></tr>
-                </tbody>
-              </table>
-            </div>
-        </section>
-
-        <section class="panel intraday-history-panel" aria-labelledby="intraday-history-heading">
+        <section id="intraday-history-panel" class="panel intraday-history-panel" aria-labelledby="intraday-history-heading">
           <div class="section-heading intraday-history-heading">
             <div class="intraday-history-title-line">
               <h2 id="intraday-history-heading">历史分时回看</h2>
@@ -254,13 +284,13 @@
               <strong id="intraday-history-tooltip-value" class="intraday-pnl-tooltip-value">--</strong>
               <span id="intraday-history-tooltip-cumulative" class="intraday-history-tooltip-cumulative">累计 --</span>
             </div>
-            <span id="intraday-history-hover-help" class="visually-hidden">上栏为每日当日盈亏分时（每日归零）；下栏为统计期间累计盈亏，昨日收盘连续衔接今日开盘。鼠标悬浮或使用左右方向键逐点查看，悬浮内容含当日与累计两个值。</span>
+            <span id="intraday-history-hover-help" class="visually-hidden">上栏为每日当日盈亏分时（每日归零）；下栏为统计期间累计盈亏，已知交易日连续衔接，缺失或不完整交易日后标记未知并断链。鼠标悬浮或使用左右方向键逐点查看，悬浮内容含当日与累计两个值。</span>
             <div id="intraday-history-empty" class="intraday-pnl-empty" role="status" aria-live="polite">正在获取历史分时数据…</div>
           </div>
-          <p id="intraday-history-note" class="intraday-pnl-note">上栏为每日当日盈亏分时（每日归零）；下栏为统计期间累计盈亏连续曲线（昨日收盘衔接今日开盘，跨日不归零）；横轴按交易日从左到右拼接，每段为固定交易时段 09:30–11:30 / 13:00–15:00（午休折叠）；两栏纵轴各自独立刻度；盈亏曲线与上方「盘中当日盈亏」的选择联动。</p>
+          <p id="intraday-history-note" class="intraday-pnl-note">上栏为每日当日盈亏分时（每日归零）；下栏为统计期间累计盈亏（已知交易日衔接，跨日不归零；缺失或不完整交易日后标记未知并断链，不按零补齐）；横轴按交易日从左到右拼接，每段为固定交易时段 09:30–11:30 / 13:00–15:00（午休折叠）；两栏纵轴各自独立刻度；盈亏曲线与上方「盘中当日盈亏」的选择联动。</p>
         </section>
 
-        <section class="panel daily-pnl-history-panel" aria-labelledby="daily-pnl-history-heading">
+        <section id="daily-pnl-history-panel" class="panel daily-pnl-history-panel" aria-labelledby="daily-pnl-history-heading">
           <div class="section-heading daily-pnl-history-heading">
             <div class="daily-pnl-history-title-line">
               <h2 id="daily-pnl-history-heading">每日总持仓盈亏</h2>
@@ -347,26 +377,27 @@
         <section class="panel derivatives-panel" aria-labelledby="derivatives-heading">
           <div class="section-heading">
             <div class="derivatives-title-line">
-              <h2 id="derivatives-heading">衍生品风险仪表盘 · 观点核查</h2>
+              <h2 id="derivatives-heading">衍生品风险监控</h2>
               <span id="derivatives-state" class="decision-badge is-pending">待计算</span>
-              <span class="decision-badge is-warning">口径已升级</span>
+              <span class="decision-badge is-warning">观点留档已过滤</span>
             </div>
             <span id="derivatives-meta" class="decision-module-meta">--</span>
           </div>
+          <div id="derivatives-monitor-summary" class="monitor-summary" aria-live="polite"></div>
           <p class="derivatives-intro">
-            对 2026-10-15《市场研判风险提示》逐条做<b>因子化改写与口径审查</b>：把「期权贵不贵」「Vega 很低就是 VIX」「skew 偏空」这类不可比的说法，换成行业标准口径（IV 历史百分位、25Δ 风险逆转/蝶式、期限结构 contango/backwardation），再逐条用实盘数据自动核对。
-            <b>核不上的会明写「待验证」，不替它圆场。</b>
+            对 2026-10-15《市场研判风险提示》的口径审查与回溯判定保留在后台；面板只展示<b>口径科学</b>的因子与<b>已验证 / 部分成立</b>的观点，不成立与待验证的条目不再展示。
+            徽标为<b>量化监控信号</b>（正常 / 关注 / 警示），由实时读数对照阈值触发，与「原观点是否说对」无关；悬停徽标可查看阈值规则。
           </p>
 
           <div class="derivatives-layout">
             <div class="derivatives-col">
-              <div class="subheading">① 因子科学性审查 <span class="muted">原文口径 → 本面板口径</span></div>
+              <div class="subheading">① 有效因子口径 <span class="muted">仅保留成立的口径改写</span></div>
               <div id="derivatives-factors" class="factor-review">
                 <span class="muted">等待数据</span>
               </div>
             </div>
             <div class="derivatives-col">
-              <div class="subheading">② 实时衍生品读数 <span class="muted">行业标准口径</span></div>
+              <div class="subheading">② 实时衍生品读数 <span class="muted">行业标准口径 + 阈值徽标</span></div>
               <div id="derivatives-readings" class="derivatives-readings">
                 <span class="muted">等待数据</span>
               </div>
@@ -374,7 +405,7 @@
           </div>
 
           <div class="derivatives-checks-head">
-            <div class="subheading">③ 观点逐条核查 <span class="muted">实盘数据自动核对</span></div>
+            <div class="subheading">③ 观点核查 · 量化提示 <span class="muted">仅保留已验证与部分成立</span></div>
             <div id="derivatives-check-summary" class="derivatives-check-summary"></div>
           </div>
           <div id="derivatives-checks" class="derivatives-checks">
@@ -408,7 +439,7 @@
           <p class="summary-note">各流派在每只重仓股上的持仓状态已并入上方「持仓行情」表的流派信号列。规则：趋势跟踪=MA20/MA60 金叉满仓、死叉空仓；道氏=更高低点+突破前波段高点买入、跌破前波段低点卖出；Wyckoff=25 日窄幅整理后放量 1.8 倍突破上沿买入、跌破下沿或回撤 12% 卖出。信号以收盘价确认，盘中为预估；提示日志只记录状态变化，用于事后回溯正确率，不构成投资建议。</p>
         </section>
 
-        <section class="panel risk-panel" aria-labelledby="risk-heading">
+        <section id="risk-panel" class="panel risk-panel" aria-labelledby="risk-heading">
           <div class="section-heading">
             <div class="risk-title-line">
               <h2 id="risk-heading">风险与行动</h2>
@@ -486,22 +517,6 @@
             <p id="rebalance-note" class="decision-note">本页不连接券商；任何草案均需核对账户与人工复核。</p>
           </section>
         </div>
-
-        <section class="panel news-panel" aria-labelledby="news-heading">
-          <div class="section-heading news-heading-row">
-            <h2 id="news-heading">重要新闻</h2>
-            <select id="news-symbol-filter" aria-label="按持仓筛选新闻">
-              <option value="all">全部持仓</option>
-            </select>
-          </div>
-          <div class="news-meta">
-            <span id="news-source">新闻源 --</span>
-            <span id="news-count">0 条</span>
-          </div>
-          <div id="news-list" class="news-list" aria-live="polite">
-            <div class="empty">正在获取相关新闻…</div>
-          </div>
-        </section>
 
         <section id="compare-panel" class="panel compare-panel" aria-labelledby="compare-heading" hidden>
           <div class="section-heading">
@@ -713,6 +728,7 @@
           <span id="stock-chart-meta">等待选择股票</span>
         </div>
         <button id="stock-chart-close" class="stock-chart-close" type="button" aria-label="关闭股票行情图">×</button>
+        <span id="stock-chart-quote" class="stock-chart-quote"></span>
       </div>
       <div class="stock-chart-grid">
         <figure class="stock-chart-figure">
@@ -759,7 +775,8 @@
     </dialog>
 
     <noscript>此页面需要启用 JavaScript 才能更新实时行情。</noscript>
+    <div id="news-tooltip" class="news-tooltip" role="dialog" aria-label="重要新闻详情" hidden></div>
     <script src="/vendor/echarts.min.js" defer></script>
-    <script src="/app.js?v=20261020b" defer></script>
+    <script src="/app.js?v=20261103a" defer></script>
   </body>
 </html>

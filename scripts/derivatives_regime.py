@@ -544,6 +544,7 @@ def _check_level_3741(ctx: dict[str, Any]) -> dict[str, Any]:
             "level": _LEVEL_CLAIM, "days_below": len(closes_below),
             "days_touched": len(touched), "days_recrossed": len(recross),
             "days_broken": len(broke), "total_days": len(after),
+            "last_close": after[-1]["close"], "last_date": after[-1]["date"],
         },
     }
 
@@ -884,6 +885,230 @@ STATUS_TEXT = {
 }
 
 
+# ---------------------------------------------------------------- 展示过滤
+#
+# 面板只保留「正确」的内容：因子审查区只留口径本身成立的三条，观点核查区只留
+# 已验证/部分成立。判定逻辑本身照常运行——被隐藏的条目仍会随数据变化重新
+# 计算，明天若变成「部分成立」会自动回到面板上，不是写死的静态清单。
+
+# 口径科学、可直接作为监控依据的因子（verdict 为 ok / principle）。
+FACTOR_REVIEW_VISIBLE_FACTORS = ("期限结构", "市场广度", "杠杆的本质")
+
+# 仅展示「已验证」与「部分成立」；不成立/待验证从面板隐藏。
+VISIBLE_CLAIM_STATUSES = frozenset({"confirmed", "partial"})
+
+
+def visible_factor_review() -> list[dict[str, Any]]:
+    """因子科学性审查的白名单视图。"""
+    return [
+        item for item in FACTOR_REVIEW
+        if item.get("factor") in FACTOR_REVIEW_VISIBLE_FACTORS
+    ]
+
+
+def filter_visible_checks(checks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """返回（可见观点, 被隐藏条数）。被隐藏的是不成立与待验证两类。"""
+    visible = [
+        item for item in checks
+        if str(item.get("status") or "pending") in VISIBLE_CLAIM_STATUSES
+    ]
+    return visible, len(checks) - len(visible)
+
+
+# ---------------------------------------------------------------- 量化监控
+#
+# 与「原观点是否说对」相互独立：confirmed/refuted 是对一段历史发言的回溯判定，
+# 监控徽标回答的是「现在这个读数要不要警惕」。两者共用同一份取数结果，
+# 但阈值与文案各自定义，避免把「观点说错了」误读成「现在有风险」。
+
+MONITOR_STATUS_TEXT = {
+    "normal": "正常",
+    "watch": "关注",
+    "alert": "警示",
+    "unknown": "暂无数据",
+}
+
+# 历史百分位样本不足时不评级：几十个交易日的分布不足以支撑「历史偏高」。
+_IV_PERCENTILE_MIN_SAMPLE_DAYS = 20
+
+
+def _monitor_item(
+    monitor_id: str,
+    label: str,
+    status: str,
+    value: Optional[float],
+    value_text: str,
+    threshold_text: str,
+) -> dict[str, Any]:
+    return {
+        "id": monitor_id,
+        "label": label,
+        "status": status,
+        "status_text": MONITOR_STATUS_TEXT.get(status, "暂无数据"),
+        "value": value,
+        "value_text": value_text,
+        "threshold_text": threshold_text,
+    }
+
+
+def _unknown_item(monitor_id: str, label: str, threshold_text: str) -> dict[str, Any]:
+    return _monitor_item(monitor_id, label, "unknown", None, "--", threshold_text)
+
+
+def _build_monitoring(
+    ctx: dict[str, Any], checks: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """由本次取数结果生成量化监控信号（不做任何网络请求）。"""
+    metrics_by_id = {
+        str(item.get("id") or ""): (item.get("metrics") or {})
+        for item in checks
+    }
+    items: list[dict[str, Any]] = []
+
+    # 1. 上证下行趋势：沿用观点核查的同一基准与区间涨跌幅。
+    threshold = "相对 2026-10-14 基准收盘：累计跌幅 >5% 警示，<0 关注，≥0 正常"
+    trend_metrics = metrics_by_id.get("market_direction") or {}
+    change_pct = trend_metrics.get("change_pct")
+    if isinstance(change_pct, (int, float)):
+        status = "alert" if change_pct < -5 else ("watch" if change_pct < 0 else "normal")
+        items.append(_monitor_item(
+            "sse_trend", "上证下行趋势", status, round(float(change_pct), 2),
+            f"区间 {change_pct:+.2f}%", threshold,
+        ))
+    else:
+        items.append(_unknown_item("sse_trend", "上证下行趋势", threshold))
+
+    # 2. 3741 点位：收盘低于该位且未收复 = 破位状态。
+    threshold = "上证收盘 <3741 且期间未收复 = 警示；重新站上 = 正常"
+    level_metrics = metrics_by_id.get("level_3741") or {}
+    last_close = level_metrics.get("last_close")
+    if isinstance(last_close, (int, float)):
+        recrossed = int(level_metrics.get("days_recrossed") or 0)
+        broken = last_close < _LEVEL_CLAIM and recrossed == 0
+        items.append(_monitor_item(
+            "level_3741", "3741 点位", "alert" if broken else "normal",
+            round(float(last_close), 2),
+            f"最新收盘 {last_close:.2f} · {'未收复' if broken else '已站上'}",
+            threshold,
+        ))
+    else:
+        items.append(_unknown_item("level_3741", "3741 点位", threshold))
+
+    # 3. 市场广度：上涨家数占比。
+    threshold = "上涨家数占比 <35% 警示，<50% 关注，≥50% 正常"
+    breadth = ctx.get("breadth") or {}
+    up_ratio = breadth.get("up_ratio_pct")
+    if isinstance(up_ratio, (int, float)) and breadth.get("total"):
+        status = "alert" if up_ratio < 35 else ("watch" if up_ratio < 50 else "normal")
+        items.append(_monitor_item(
+            "breadth", "市场广度", status, round(float(up_ratio), 2),
+            f"上涨占比 {up_ratio:.2f}%（{breadth.get('up')}/{breadth.get('total')}）",
+            threshold,
+        ))
+    else:
+        items.append(_unknown_item("breadth", "市场广度", threshold))
+
+    # 4. VIX 历史百分位：跨时点可比，代替「VIX 高不高」的绝对值说法。
+    threshold = "VIX 500 日历史百分位 ≥80 警示，≥50 关注，<50 正常"
+    vix_quote = ctx.get("vix_quote") or {}
+    vix_series = [row["close"] for row in (ctx.get("vix_history") or {}).get("series") or []]
+    vix_last = vix_quote.get("last")
+    vix_percentile = (
+        _percentile_of(vix_last, vix_series)
+        if isinstance(vix_last, (int, float)) and vix_series
+        else None
+    )
+    if vix_percentile is not None:
+        status = "alert" if vix_percentile >= 80 else ("watch" if vix_percentile >= 50 else "normal")
+        items.append(_monitor_item(
+            "vix_percentile", "VIX 历史百分位", status, vix_percentile,
+            f"{vix_last:.2f} · 第 {vix_percentile} 百分位", threshold,
+        ))
+    else:
+        items.append(_unknown_item("vix_percentile", "VIX 历史百分位", threshold))
+
+    option_items = ctx.get("option_items") or []
+    option = option_items[0] if option_items else {}
+    near = option.get("iv_near") or {}
+    iv_near = near.get("iv")
+
+    # 5. A股近月平值 IV 自身历史百分位。
+    threshold = (
+        f"50ETF 近月平值 IV 自身历史百分位 ≥80 警示，≥60 关注；"
+        f"样本不足 {_IV_PERCENTILE_MIN_SAMPLE_DAYS} 个交易日不评级"
+    )
+    iv_sample = ctx.get("iv_history_sample") or []
+    iv_percentile = (
+        _percentile_of(iv_near, iv_sample)
+        if isinstance(iv_near, (int, float)) and iv_sample
+        else None
+    )
+    if not isinstance(iv_near, (int, float)):
+        items.append(_unknown_item("cn_iv_percentile", "A股 IV 百分位", threshold))
+    elif len(iv_sample) < _IV_PERCENTILE_MIN_SAMPLE_DAYS or iv_percentile is None:
+        items.append(_monitor_item(
+            "cn_iv_percentile", "A股 IV 百分位", "unknown",
+            round(float(iv_near), 2),
+            f"IV {iv_near:.2f}% · 样本 {len(iv_sample)} 日，暂不评级",
+            threshold,
+        ))
+    else:
+        status = "alert" if iv_percentile >= 80 else ("watch" if iv_percentile >= 60 else "normal")
+        items.append(_monitor_item(
+            "cn_iv_percentile", "A股 IV 百分位", status, iv_percentile,
+            f"IV {iv_near:.2f}% · 第 {iv_percentile} 百分位", threshold,
+        ))
+
+    # 6. 期限结构：期权口径里最早的近端避险信号。
+    threshold = "近月 IV 高于次月（backwardation）警示，flat 关注，contango 正常"
+    shape = option.get("term_shape")
+    if shape in {"contango", "backwardation", "flat"}:
+        status = {"backwardation": "alert", "flat": "watch", "contango": "normal"}[shape]
+        slope = option.get("term_slope")
+        slope_text = f" · 近月−次月 {slope:+.2f}pp" if isinstance(slope, (int, float)) else ""
+        items.append(_monitor_item(
+            "term_structure", "期限结构", status, None,
+            f"{shape}{slope_text}", threshold,
+        ))
+    else:
+        items.append(_unknown_item("term_structure", "期限结构", threshold))
+
+    # 7. 25Δ 风险逆转：下行保护相对上行投机贵多少。
+    threshold = "25Δ RR（认沽 IV − 认购 IV）>3pp 警示，>0 关注，≤0 正常"
+    rr = option.get("rr_25d")
+    if isinstance(rr, (int, float)):
+        status = "alert" if rr > 3 else ("watch" if rr > 0 else "normal")
+        items.append(_monitor_item(
+            "rr_25d", "25Δ 风险逆转", status, round(float(rr), 2),
+            f"{rr:+.2f}pp", threshold,
+        ))
+    else:
+        items.append(_unknown_item("rr_25d", "25Δ 风险逆转", threshold))
+
+    return items
+
+
+def _monitoring_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """按状态计数，供面板头部汇总。unknown 不计入警示。"""
+    summary: dict[str, Any] = {"normal": 0, "watch": 0, "alert": 0, "unknown": 0, "total": len(items)}
+    for item in items:
+        status = str(item.get("status") or "unknown")
+        summary[status] = summary.get(status, 0) + 1
+    summary["text"] = (
+        "全部正常"
+        if summary["alert"] == 0 and summary["watch"] == 0 and summary["unknown"] == 0
+        else " · ".join(
+            part for part in (
+                f"{summary['alert']} 项警示" if summary["alert"] else "",
+                f"{summary['watch']} 项关注" if summary["watch"] else "",
+                f"{summary['unknown']} 项暂无数据" if summary["unknown"] else "",
+                "其余正常" if not (summary["alert"] or summary["watch"] or summary["unknown"]) else "",
+            ) if part
+        )
+    )
+    return summary
+
+
 # ------------------------------------------------------------------- 组装
 
 
@@ -1009,6 +1234,24 @@ def compute_derivatives_regime() -> dict[str, Any]:
             "metrics": verdict.get("metrics", {}),
         })
 
+    monitoring = _build_monitoring(ctx, checks)
+    monitoring_by_id = {item["id"]: item for item in monitoring}
+    # 每条保留的观点核查挂一个对应的量化信号：趋势/点位/广度/VIX/IV/期限结构。
+    # 原理类条目（杠杆、Theta、裸卖等）没有可监控的数值，不强行配信号。
+    claim_monitor_map = {
+        "market_direction": "sse_trend",
+        "level_3741": "level_3741",
+        "breadth_broken": "breadth",
+        "us_options_expensive": "vix_percentile",
+        "cn_options_cheap": "cn_iv_percentile",
+        "term_structure": "term_structure",
+    }
+    for item in checks:
+        signal = monitoring_by_id.get(claim_monitor_map.get(str(item.get("id") or ""), ""))
+        item["monitor"] = dict(signal) if signal else None
+
+    visible_checks, hidden_checks = filter_visible_checks(checks)
+
     # 实时衍生品读数（前端卡片）
     readings: list[dict[str, Any]] = []
     for item in ctx.get("option_items") or []:
@@ -1058,8 +1301,13 @@ def compute_derivatives_regime() -> dict[str, Any]:
         "ok": True,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "claim_source": CLAIM_SOURCE,
-        "factor_review": FACTOR_REVIEW,
-        "checks": checks,
+        "factor_review": visible_factor_review(),
+        "factor_review_hidden_count": len(FACTOR_REVIEW) - len(FACTOR_REVIEW_VISIBLE_FACTORS),
+        "checks": visible_checks,
+        "checks_total": len(checks),
+        "checks_hidden_count": hidden_checks,
+        "monitoring": monitoring,
+        "monitoring_summary": _monitoring_summary(monitoring),
         "readings": readings,
         "vix": vix,
         "options_meta": ctx.get("options_meta") or {},
@@ -1105,8 +1353,10 @@ def get_derivatives_regime() -> dict[str, Any]:
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "error": f"{type(exc).__name__}: {exc}",
             "claim_source": CLAIM_SOURCE,
-            "factor_review": FACTOR_REVIEW,
+            "factor_review": visible_factor_review(),
             "checks": [],
+            "monitoring": [],
+            "monitoring_summary": _monitoring_summary([]),
             "readings": [],
             "vix": {},
         }

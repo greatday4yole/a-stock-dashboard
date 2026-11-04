@@ -329,6 +329,9 @@ input:focus-visible,
 main {
   display: grid;
   gap: 8px;
+  /* grid 子项默认 min-width:auto，宽表格会据此把整列撑到内容宽度，
+     导致整页横向滚动。显式归零，让内部 overflow 容器接管滚动。 */
+  grid-template-columns: minmax(0, 1fr);
 }
 
 /* 宽屏下 portfolio-view 内面板双列布局 */
@@ -341,11 +344,14 @@ main {
 
   /* 全宽面板 */
   #portfolio-view > .summary-panel,
+  #portfolio-view > .breakeven-panel,
   #portfolio-view > .intraday-pnl-panel,
   #portfolio-view > .market-panel,
   #portfolio-view > .paper-t-history-panel,
   #portfolio-view > .personal-index-panel,
-  #portfolio-view > .positions-panel {
+  #portfolio-view > .positions-panel,
+  #portfolio-view > .watchlist-panel,
+  #portfolio-view > .section-nav {
     grid-column: 1 / -1;
   }
 
@@ -365,6 +371,49 @@ main {
   border-radius: 4px;
   background: var(--panel);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.section-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 0;
+  overflow-x: auto;
+  background: var(--bg);
+  scrollbar-width: thin;
+}
+
+.section-nav[hidden],
+.watchlist-panel[hidden] {
+  display: none;
+}
+
+.section-nav a {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel);
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.section-nav a:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.section-nav a:focus-visible {
+  outline: 2px solid rgba(78, 104, 125, 0.35);
+  outline-offset: 1px;
+}
+
+section[id] {
+  scroll-margin-top: 8px;
 }
 
 .section-heading {
@@ -634,6 +683,24 @@ a.market-news-item-title:hover {
 
 .global-grid {
   grid-template-columns: repeat(4, minmax(95px, 1fr));
+}
+
+/* 全球参考与隔夜模块共用的国家/交易时区标题。 */
+.market-zone-label {
+  grid-column: 1 / -1;
+  display: block;
+  margin-top: 3px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--line-soft);
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.35px;
+}
+
+.global-grid > .market-zone-label:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .overnight-block {
@@ -2141,7 +2208,7 @@ a.decision-row-title:hover {
 
 .positions-table {
   width: 100%;
-  min-width: 1680px;
+  min-width: 1484px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -2180,23 +2247,26 @@ a.decision-row-title:hover {
   text-align: left;
 }
 
-/* 16 列：代码 分时 行业 现价 当日% 涨跌额 信号 流派信号 做T参考 换手 PE PB 权重 市值 自设线 ⚙ */
-.positions-table th:nth-child(1) { width: 140px; }
-.positions-table th:nth-child(2) { width: 84px; }
-.positions-table th:nth-child(3) { width: 90px; }
-.positions-table th:nth-child(4) { width: 64px; }
-.positions-table th:nth-child(5) { width: 62px; }
-.positions-table th:nth-child(6) { width: 84px; }
-.positions-table th:nth-child(7) { width: 116px; }
-.positions-table th:nth-child(8) { width: 186px; }
-.positions-table th:nth-child(9) { width: 200px; }
-.positions-table th:nth-child(10) { width: 50px; }
-.positions-table th:nth-child(11) { width: 48px; }
-.positions-table th:nth-child(12) { width: 68px; }
-.positions-table th:nth-child(13) { width: 76px; }
-.positions-table th:nth-child(14) { width: 108px; }
-.positions-table th:nth-child(15) { width: 140px; }
-.positions-table th:nth-child(16) { width: 44px; }
+/* 17 列：代码 分时 行业 现价 当日% 涨跌额 信号 流派信号 换手 PE PB 重要新闻 最新财报 权重 市值 自设线 ⚙
+   列宽之和 == min-width，否则 table-layout:fixed 会按比例把余量摊回每列，
+   实际宽度就不再是这里写的值（之前「最新财报」只有 68px 的根因之一）。 */
+.positions-table th:nth-child(1) { width: 116px; }
+.positions-table th:nth-child(2) { width: 76px; }
+.positions-table th:nth-child(3) { width: 74px; }
+.positions-table th:nth-child(4) { width: 56px; }
+.positions-table th:nth-child(5) { width: 54px; }
+.positions-table th:nth-child(6) { width: 74px; }
+.positions-table th:nth-child(7) { width: 96px; }
+.positions-table th:nth-child(8) { width: 216px; }
+.positions-table th:nth-child(9) { width: 44px; }
+.positions-table th:nth-child(10) { width: 42px; }
+.positions-table th:nth-child(11) { width: 42px; }
+.positions-table th:nth-child(12) { width: 92px; }
+.positions-table th:nth-child(13) { width: 196px; }
+.positions-table th:nth-child(14) { width: 60px; }
+.positions-table th:nth-child(15) { width: 92px; }
+.positions-table th:nth-child(16) { width: 118px; }
+.positions-table th:nth-child(17) { width: 36px; }
 
 .table-sort-button {
   width: 100%;
@@ -2514,10 +2584,37 @@ th[aria-sort="descending"] .sort-indicator::after {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 4px 7px 4px 9px;
   border-bottom: 1px solid var(--line-soft);
   background: var(--panel-alt);
+}
+
+/* 弹层里的"股票信息"行：价格 / 涨跌幅 / 报价时间 / 与持仓相关度。
+   单独占一行，行情刷新时跟着走，用来判断"图是不是最新的"。 */
+.stock-chart-quote {
+  order: 3;
+  flex: 0 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--text);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.stock-chart-quote[hidden] {
+  display: none;
+}
+
+.stock-chart-quote-price {
+  font-weight: 620;
+}
+
+.stock-chart-quote-correlation {
+  color: var(--faint);
 }
 
 .stock-chart-heading {
@@ -2748,6 +2845,90 @@ th[aria-sort="descending"] .sort-indicator::after {
 .stock-intraday-dot {
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
+}
+
+/* 宽基ETF监控（原「全球参考」英国/德法位置）：卡片 = 名称/价格 + 分时走势
+   （价格线）+ 成交量柱副图 + 成交额/较昨日全天放量。 */
+.etf-broad-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 6px 12px;
+}
+
+.etf-broad-item {
+  padding: 5px 8px 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: #fdfefe;
+}
+
+.etf-broad-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+
+.etf-broad-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #2b343a;
+}
+
+.etf-broad-price {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.etf-broad-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.etf-broad-vol-bar {
+  opacity: 0.75;
+}
+
+.etf-broad-vol-bar.up {
+  fill: var(--up);
+}
+
+.etf-broad-vol-bar.down {
+  fill: var(--down);
+}
+
+.etf-broad-vol-bar.flat {
+  fill: #7c858b;
+}
+
+.etf-broad-vol-bar.is-peak {
+  opacity: 1;
+  stroke-width: 0.5;
+}
+
+.etf-broad-stats {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+
+.etf-broad-volume {
+  font-weight: 600;
+}
+
+.etf-broad-volume.is-up {
+  color: var(--up);
+}
+
+.etf-broad-volume.is-down {
+  color: var(--down);
 }
 
 .stock-chart-note {
@@ -3047,17 +3228,43 @@ noscript {
   }
 
   .topbar {
-    align-items: flex-start;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 4px;
+    padding-bottom: 6px;
+  }
+
+  .brand-line {
+    width: 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+
+  .brand-line h1 {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 
   .topbar-actions {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
     flex-wrap: wrap;
     gap: 5px 8px;
+    white-space: normal;
+  }
+
+  .topbar-actions > * {
+    flex: 0 0 auto;
   }
 
   #freshness-text {
     width: 100%;
-    text-align: right;
+    min-width: 0;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .market-grid {
@@ -3079,6 +3286,10 @@ noscript {
 
   .market-lower {
     grid-template-columns: 1fr;
+  }
+
+  .etf-broad-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .market-news-list {
@@ -3802,6 +4013,71 @@ noscript {
 }
 
 
+/* 观察名单与持仓共用行情和K线弹层，但只展示公开市场数据。 */
+.watchlist-panel {
+  overflow: hidden;
+}
+
+.watchlist-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.watchlist-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+}
+
+.watchlist-table th,
+.watchlist-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.watchlist-table th {
+  background: var(--panel-alt);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.watchlist-table th.numeric,
+.watchlist-table td.numeric {
+  text-align: right;
+}
+
+.watchlist-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.watchlist-row.is-stale td {
+  background-image: linear-gradient(rgba(246, 242, 233, 0.45), rgba(246, 242, 233, 0.45));
+}
+
+.watchlist-status {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  color: var(--muted);
+}
+
+.watchlist-status.is-stale {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.watchlist-quote-time {
+  color: var(--faint);
+  font-size: 9.5px;
+}
+
+.position-intraday-placeholder.is-error {
+  color: var(--error);
+}
+
 /* 做T参考内容已移出持仓表列位，样式由 .t-plan-* 系列承接；
    .position-plan 仅作历史兼容保留。 */
 .position-plan {
@@ -4367,4 +4643,402 @@ noscript {
   font-size: 9.5px;
   line-height: 1.6;
   color: #596168;
+}
+
+/* ===== 回本可行性 ===== */
+/* 这一块唯一的作用是把「回本」从主观感受变成可核对的数量级：目标倍数、
+  路径概率、以及不同年化收益下的所需年限。全部为只读展示，不参与门禁。 */
+.breakeven-panel {
+  /* 面板必须显式收口：内部的六列表格会把它撑到 1600px 以上，导致整页横向
+     滚动、摘要后半部分不可见。min-width:0 让 grid 子项允许被压缩。 */
+  overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.breakeven-summary {
+  display: grid;
+  /* 固定四列：这是四个必须同时出现的对照数字（目标/现值/需涨/波动），
+     让它们换行或缩没都会削弱「回本有多难」这一核心判断。 */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line-soft);
+}
+
+@media (max-width: 560px) {
+  .breakeven-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.breakeven-alert {
+  margin: 0;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.breakeven-scenarios {
+  display: grid;
+  gap: 6px;
+  padding: 8px 9px;
+}
+
+.breakeven-scenario {
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  background: var(--panel-alt);
+  padding: 7px 8px;
+}
+
+.breakeven-scenario-heading {
+  margin-bottom: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.breakeven-horizons {
+  display: grid;
+  /* 四个期限固定并排，便于横向比较「1→2→3→5 年」的概率递增。 */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+@media (max-width: 560px) {
+  .breakeven-horizons {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.breakeven-horizon {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border-left: 2px solid var(--line);
+}
+
+.breakeven-horizon strong {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.breakeven-horizon span {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.breakeven-horizon em {
+  font-size: 9.5px;
+  font-style: normal;
+  color: var(--faint);
+}
+
+.breakeven-scenario-note {
+  margin: 6px 0 0;
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+.breakeven-timeline-wrap {
+  padding: 0 9px 8px;
+}
+
+.breakeven-timeline-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.breakeven-timeline-chip {
+  padding: 2px 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  background: var(--panel-alt);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.breakeven-positions-wrap {
+  padding: 0 9px 8px;
+  /* 六列表格在窄视口下的最小内容宽度会超过面板，若不在这里收口，会把整个
+     面板（连同摘要的前两列之外的部分）一起撑出视口，造成右侧内容不可见。 */
+  overflow-x: auto;
+}
+
+.breakeven-table {
+  width: 100%;
+  min-width: 420px;
+  margin-top: 4px;
+  border-collapse: collapse;
+  font-size: 10.5px;
+}
+
+.breakeven-table th {
+  padding: 3px 5px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 500;
+  text-align: right;
+}
+
+.breakeven-table th:first-child {
+  text-align: left;
+}
+
+.breakeven-table td {
+  padding: 3px 5px;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.breakeven-table td:first-child {
+  text-align: left;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.breakeven-table td.muted {
+  text-align: left;
+  font-size: 9.5px;
+}
+
+.breakeven-note {
+  margin: 0;
+  padding: 4px 9px 6px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--faint);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+/* 衍生品量化监控：徽标 + 阈值说明 */
+.monitor-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 6px 0 4px;
+}
+
+.monitor-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.monitor-summary-value {
+  color: #3f4a50;
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-badge {
+  white-space: nowrap;
+}
+
+.derivative-monitor-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #e3e7ea;
+  font-size: 12px;
+}
+
+.check-monitor-rule {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.monitor-summary-headline {
+  flex-basis: 100%;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.monitor-summary-headline.is-ok { color: #1d7a4f; }
+.monitor-summary-headline.is-warning { color: #9a6a00; }
+.monitor-summary-headline.is-blocked { color: #b3261e; }
+
+/* 持仓表「最新财报」列：五行小字，避免长数字把行高撑开 */
+.fundamental-cell {
+  min-width: 112px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.fundamental-period {
+  display: block;
+  font-weight: 600;
+  color: #3f4a50;
+}
+
+.fundamental-period.is-pending {
+  color: #8a6d1f;
+  font-weight: 500;
+}
+
+.fundamental-line {
+  display: block;
+  font-variant-numeric: tabular-nums;
+}
+
+.fundamental-org {
+  display: block;
+}
+
+/* 流派信号：判断时刻紧贴芯片下方 */
+.school-judged-at {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* 持仓表「重要新闻」列：只显示日期，颜色表示消息好坏（红=好/黑=中性/绿=坏） */
+.news-cell {
+  white-space: nowrap;
+}
+
+.news-date-chip {
+  display: inline-block;
+  margin: 0 4px 3px 0;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg);
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.news-date-chip.is-good {
+  color: var(--up);
+  border-color: color-mix(in srgb, var(--up) 45%, var(--line));
+}
+
+.news-date-chip.is-bad {
+  color: var(--down);
+  border-color: color-mix(in srgb, var(--down) 45%, var(--line));
+}
+
+.news-date-chip.is-neutral {
+  color: #3f4a50;
+}
+
+.news-date-chip:hover,
+.news-date-chip:focus-visible {
+  background: var(--panel-alt);
+  outline: 1px solid rgba(78, 96, 109, 0.35);
+  outline-offset: 1px;
+}
+
+.news-more {
+  font-size: 11px;
+}
+
+/* 新闻浮层：点日期后出现在按钮下方，列出当天全部标题 */
+.news-tooltip {
+  position: fixed;
+  z-index: 60;
+  width: min(340px, calc(100vw - 24px));
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(40, 52, 60, 0.16);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.news-tooltip[hidden] {
+  display: none;
+}
+
+.news-tooltip.is-good { border-left: 3px solid var(--up); }
+.news-tooltip.is-bad { border-left: 3px solid var(--down); }
+
+.news-tooltip-head {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+  color: #3f4a50;
+}
+
+.news-tooltip-item + .news-tooltip-item {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--line-soft);
+}
+
+.news-tooltip-title {
+  display: block;
+  color: #2f3a41;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+a.news-tooltip-title:hover {
+  text-decoration: underline;
+}
+
+.news-tooltip-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+/* 列头内的判断时刻小字 */
+.positions-table th .header-sub {
+  display: block;
+  margin-top: 1px;
+  font-size: 9.5px;
+  font-weight: 400;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* 报告期行内的机构数：比主标签淡一档 */
+.fundamental-org-inline {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* 持仓表内的流派芯片比信号卡里的更紧凑：这一列要并排放三枚，
+   沿用卡片样式（11.5px + 7px 内边距）时第三枚会被挤到下一行。 */
+.positions-table .position-schools .school-mini-chip {
+  padding: 1px 5px;
+  margin: 0 3px 3px 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.positions-table .position-schools .school-overall {
+  font-size: 11px;
+}
+
+/* 毛利/ROE/EPS：三项挤在一行，用等宽数字 + 紧凑间距，避免折成两行抬高行高 */
+.fundamental-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 6px;
+  font-size: 10.5px;
+  letter-spacing: -0.1px;
 }

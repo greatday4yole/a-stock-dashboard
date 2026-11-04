@@ -44,6 +44,7 @@ MAX_TRIGGER_SUMMARIES = 5
 MAX_SUMMARY_CHARS = 180
 DEFAULT_POSITION_NEWS_MAX_AGE_SECONDS = 3_600.0
 DEFAULT_MARKET_NEWS_MAX_AGE_SECONDS = 300.0
+DEFAULT_MARKET_STATE_MAX_AGE_SECONDS = 300.0
 DEFAULT_AUDIT_MAX_BYTES = 16 * 1024 * 1024
 DEFAULT_AUDIT_KEEP_RECENT_TRANSITIONS = 24
 AUDIT_CHECKPOINT_PAYLOAD_TYPE = "portfolio-position-advice-audit-checkpoint.v1"
@@ -609,6 +610,8 @@ def _verification_gate(
             or bool(quality.get("critical_failures"))
             or cache.get("stale") is True
             or cache.get("fresh") is False
+            or str(risk.get("portfolio_config_id") or risk.get("portfolio_id") or "")
+            != portfolio_id
         ):
             reasons.add("RISK_SNAPSHOT_UNVERIFIED")
         if (
@@ -657,11 +660,17 @@ def _verification_gate(
         reasons.add("MARKET_STATE_UNVERIFIED")
     else:
         quality = market_state.get("quality") if isinstance(market_state.get("quality"), Mapping) else {}
+        market_state_time = _payload_time(market_state)
+        market_state_age = (
+            (now - market_state_time).total_seconds() if market_state_time else None
+        )
         if (
             market_state.get("ok") is not True
             or str(market_state.get("regime") or "").upper() == "UNVERIFIED"
             or bool(quality.get("critical_failures"))
-            or _payload_time(market_state) is None
+            or market_state_age is None
+            or market_state_age < -120
+            or market_state_age > DEFAULT_MARKET_STATE_MAX_AGE_SECONDS
         ):
             reasons.add("MARKET_STATE_UNVERIFIED")
 
@@ -677,7 +686,7 @@ def _verification_gate(
             or gate.get("verified") is not True
             or liquidity.get("verified") is not True
             or events.get("verified") is not True
-            or (binding.get("portfolio_id") is not None and str(binding.get("portfolio_id")) != portfolio_id)
+            or str(binding.get("portfolio_id") or "") != portfolio_id
         ):
             reasons.add("REBALANCE_GATE_UNVERIFIED")
 

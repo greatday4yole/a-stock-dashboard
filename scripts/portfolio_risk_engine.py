@@ -613,13 +613,17 @@ def _historical_metrics(
         returns = returns.loc[(returns > -1.0).all(axis=1)]
         portfolio_sessions = len(returns)
         as_of_session = str(returns.index[-1]) if portfolio_sessions else None
-        weights = pd.Series(
-            {
-                row["thscode"]: float(row["weight_pct"]) / 100.0
-                for row in positions
-                if row["thscode"] in returns.columns
-            }
-        ).reindex(returns.columns)
+        # One return series per security, but potentially several account rows
+        # per security. Aggregate their NAV weights instead of letting a dict
+        # silently keep only the last account's allocation.
+        aggregated_weights: dict[str, float] = {}
+        for row in positions:
+            symbol = row["thscode"]
+            if symbol in returns.columns:
+                aggregated_weights[symbol] = aggregated_weights.get(symbol, 0.0) + float(
+                    row["weight_pct"]
+                ) / 100.0
+        weights = pd.Series(aggregated_weights, dtype=float).reindex(returns.columns)
         portfolio_returns = returns.mul(weights, axis=1).sum(axis=1)
 
         if portfolio_sessions >= 2:
@@ -719,7 +723,7 @@ def _historical_metrics(
     adequate = confidence >= minimum_confidence and portfolio_sessions >= minimum
     full = (
         adequate
-        and len(frames) == len(positions)
+        and set(frames) == {row["thscode"] for row in positions}
         and not short
         and not missing
         and not stale
@@ -1059,6 +1063,11 @@ def _calculate_snapshot(
                 "available": int(_finite_float(configured.get("available"), 0) or 0),
                 "holding_as_of": portfolio.get("as_of"),
                 "quantity_source": "account_snapshot",
+                # 成本基础必须随行输出：它是「回本」唯一的经济锚点，此前在
+                # 计算层就被丢弃，导致所有下游（前端、分析模块）都无法回答
+                # 「涨多少才回本」。非正数成本保留原值并标注，绝不静默改写。
+                "broker_cost": _finite_float(configured.get("broker_cost")),
+                "cost_note": configured.get("cost_note"),
                 "price": round(price, 6),
                 "market_value_cny": round(quantity * price, 2),
                 "weight_pct": None,

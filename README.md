@@ -20,6 +20,12 @@ Actions 在 A 股交易时段定时抓取行情与衍生指标，生成加密快
 5. 浏览器打开页面后输入访问密码，`static-api-shim.js` 在本地解密数据并交给原版
    `app.js` 渲染。密码不会上传，持仓数据在 GitHub 上始终是密文。
 
+### 桌面 Widget 源码
+
+`dashboard/widget.*`、`scripts/desktop_widget*`、`scripts/desktop_window_level.mm` 和
+`tests/desktop_widget.test.mjs` 是 macOS Electron 桌面盈亏组件的源码快照，随本仓库一起
+版本化；构建和运行仍在本地 `LDLChinaStock-V1.1` 中，不影响静态站点。
+
 ## 安全说明
 
 - 仓库是公开的（GitHub Free 的 Pages 只支持公开仓库），但 `config/`、`data/`
@@ -56,6 +62,14 @@ git push
 `sync_from_project.sh` 会重新复制 `scripts/` 和静态前端文件，并用最新
 `config/`、`data/` 重建 `bundle/source-data.tar.gz.enc`。推送后 Actions 会自动
 重新发布。
+
+只升级代码、保留现有加密数据包时，无需设置密钥：
+
+```bash
+./build/sync_from_project.sh --code-only ../LDLChinaStock-V1.1
+```
+
+该模式不会读取或改写 `config/`、`data/` 和加密包，也不会自动提交或推送。
 
 修改访问密码：更新 GitHub Secret `SITE_PASSWORD`，并重新运行一次完整构建即可；
 旧密码派生出的浏览器缓存会失效，需要重新输入。

@@ -34,10 +34,16 @@ import math
 import os
 import tempfile
 import threading
+from contextlib import contextmanager
 from datetime import date as date_type
 from datetime import datetime, time as daytime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
 
 try:  # 与 dashboard_server 一致的交易日判定（法定节假日）
     from chinese_calendar import is_holiday as _china_is_holiday
@@ -183,6 +189,34 @@ def _journal_path() -> Path:
     return _root() / "journal.jsonl"
 
 
+@contextmanager
+def _account_file_lock() -> Iterator[None]:
+    """Serialize account initialization and daily decisions across processes."""
+
+    root = _root()
+    root.mkdir(parents=True, exist_ok=True)
+    with open(root / "account.lock", "a+b") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        else:  # pragma: no cover - exercised on Windows
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            else:  # pragma: no cover - exercised on Windows
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def _nav_path() -> Path:
     return _root() / "nav.json"
 
@@ -215,9 +249,33 @@ def _save_state(state: Mapping[str, Any]) -> None:
         raise
 
 
+def _find_journal_entry(entry_id: str) -> Optional[Dict[str, Any]]:
+    path = _journal_path()
+    if not path.is_file():
+        return None
+    with path.open("r", encoding="utf-8") as fh:
+        for line_number, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"journal is not valid JSON at line {line_number}") from exc
+            if isinstance(item, dict) and item.get("entry_id") == entry_id:
+                return item
+    return None
+
+
 def _append_journal(entry: Mapping[str, Any]) -> None:
     root = _root()
     root.mkdir(parents=True, exist_ok=True)
+    entry_id = entry.get("entry_id")
+    if entry_id is not None:
+        committed = _find_journal_entry(str(entry_id))
+        if committed is not None:
+            if committed != dict(entry):
+                raise RuntimeError(f"conflicting journal payload for entry id: {entry_id}")
+            return
     line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
     with _journal_path().open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
@@ -225,21 +283,15 @@ def _append_journal(entry: Mapping[str, Any]) -> None:
         os.fsync(fh.fileno())
 
 
-# Journal entries produced by a decision but not yet durable in the account
-# state.  They are flushed only after the state file has been committed, so
-# the audit trail can never claim a trade the account did not apply.
-_pending_journal: List[Dict[str, Any]] = []
+def _flush_pending_journal(state: Dict[str, Any]) -> None:
+    """Flush entries already committed in state; keep them pending on any error."""
 
-
-def _flush_pending_journal() -> None:
-    """Append the journal entries queued by the last decision."""
-
-    if not _pending_journal:
+    pending = list(state.get("pending_journal") or [])
+    if not pending:
         return
-    pending = list(_pending_journal)
-    _pending_journal.clear()
     for entry in pending:
         _append_journal(entry)
+    state["pending_journal"] = []
 
 
 def _load_journal(limit: int = 500) -> List[Dict[str, Any]]:
@@ -402,18 +454,20 @@ def _initialize(now: datetime) -> Optional[Dict[str, Any]]:
         "last_decision_date": "",
         "last_error": "",
     }
+    init_entry = {
+        "entry_id": "init",
+        "ts": now.isoformat(timespec="seconds"),
+        "type": "init",
+        "note": "模拟账户初始化：镜像实盘持仓与净现金（现金−负债），自此独立决策",
+        "base_value": state["base_value"],
+        "cash": state["cash"],
+        "base_real_mv": state["base_real_mv"],
+        "positions": {s: dict(p) for s, p in positions.items()},
+    }
+    state["pending_journal"] = [init_entry]
     _save_state(state)
-    _append_journal(
-        {
-            "ts": now.isoformat(timespec="seconds"),
-            "type": "init",
-            "note": "模拟账户初始化：镜像实盘持仓与净现金（现金−负债），自此独立决策",
-            "base_value": state["base_value"],
-            "cash": state["cash"],
-            "base_real_mv": state["base_real_mv"],
-            "positions": {s: dict(p) for s, p in positions.items()},
-        }
-    )
+    _flush_pending_journal(state)
+    _save_state(state)
     return state
 
 
@@ -505,8 +559,9 @@ def _run_decisions(
     blocked = regime == "UNVERIFIED" or market.get("ceiling_pct") is None
 
     if blocked:
-        _pending_journal.append(
+        state["pending_journal"] = list(state.get("pending_journal") or []) + [
             {
+                "entry_id": f"decision:{today}",
                 "ts": now.isoformat(timespec="seconds"),
                 "type": "decision",
                 "date": today,
@@ -516,7 +571,7 @@ def _run_decisions(
                 "reason": "市场状态数据门禁未通过（UNVERIFIED），当日不执行任何交易",
                 "errors": errors,
             }
-        )
+        ]
         state["last_decision_date"] = today
         return {"date": today, "acted": False, "reason": "UNVERIFIED"}
 
@@ -678,6 +733,7 @@ def _run_decisions(
     for trade in trades:
         journal_entries.append(
             {
+                "entry_id": f"trade:{today}:{trade['symbol']}:{trade['side']}",
                 "ts": now.isoformat(timespec="seconds"),
                 "type": "trade",
                 "date": today,
@@ -696,6 +752,7 @@ def _run_decisions(
     equity_after = state["cash"] + invested_after
     journal_entries.append(
         {
+            "entry_id": f"decision:{today}",
             "ts": now.isoformat(timespec="seconds"),
             "type": "decision",
             "date": today,
@@ -712,10 +769,10 @@ def _run_decisions(
             "errors": errors,
         }
     )
-    # The journal is only written after the account state has been committed
-    # by the caller.  Writing it first would leave trades in the audit trail
-    # that the account never applied, and the next cycle would repeat them.
-    _pending_journal.extend(journal_entries)
+    # The caller commits these entries together with the account mutation.  A
+    # crash after that commit is recovered from state without re-executing the
+    # decision; a failed state commit leaves no process-global retry residue.
+    state["pending_journal"] = list(state.get("pending_journal") or []) + journal_entries
     return {"date": today, "acted": bool(trades), "trades": len(trades), "regime": regime}
 
 
@@ -766,47 +823,56 @@ def run_cycle(*, now: Optional[datetime] = None) -> Dict[str, Any]:
 
     lock: threading.Lock = STATE.get("lock") or threading.Lock()
     with lock:
-        try:
-            holdings, prices, real_mv = quotes_fn()
-        except Exception as exc:
-            _log(f"行情获取失败：{type(exc).__name__}: {exc}")
-            return {"ok": False, "reason": f"quotes: {type(exc).__name__}"}
-        if not prices:
-            return {"ok": False, "reason": "no-prices"}
-
-        state = _load_state()
-        if state is None:
-            # 初始化不限制交易日：非交易日用最近收盘镜像建仓，首个交易日即开始对比
+        with _account_file_lock():
             try:
-                state = _initialize(now)
+                holdings, prices, real_mv = quotes_fn()
             except Exception as exc:
-                _log(f"初始化失败：{type(exc).__name__}: {exc}")
-                return {"ok": False, "reason": f"init: {type(exc).__name__}"}
+                _log(f"行情获取失败：{type(exc).__name__}: {exc}")
+                return {"ok": False, "reason": f"quotes: {type(exc).__name__}"}
+            if not prices:
+                return {"ok": False, "reason": "no-prices"}
+
+            state = _load_state()
             if state is None:
-                return {"ok": False, "reason": "init-unavailable"}
-        if not trade_day:
-            return {"ok": True, "trade_day": False}
+                # 初始化不限制交易日：非交易日用最近收盘镜像建仓，首个交易日即开始对比
+                try:
+                    state = _initialize(now)
+                except Exception as exc:
+                    _log(f"初始化失败：{type(exc).__name__}: {exc}")
+                    return {"ok": False, "reason": f"init: {type(exc).__name__}"}
+                if state is None:
+                    return {"ok": False, "reason": "init-unavailable"}
+            if state.get("pending_journal"):
+                try:
+                    _flush_pending_journal(state)
+                    _save_state(state)
+                except Exception as exc:
+                    _log(f"审计恢复失败：{type(exc).__name__}: {exc}")
+                    return {"ok": False, "reason": f"journal-recovery: {type(exc).__name__}"}
+            if not trade_day:
+                return {"ok": True, "trade_day": False}
 
-        result: Dict[str, Any] = {"ok": True, "trade_day": True}
-        # 交易时段内持续刷新当日净值记录
-        if daytime(9, 30) <= now.time() <= daytime(15, 30):
-            try:
-                result["nav"] = _record_nav(state, now, prices, real_mv)
-            except Exception as exc:
-                _log(f"净值记录失败：{type(exc).__name__}: {exc}")
+            result: Dict[str, Any] = {"ok": True, "trade_day": True}
+            # 交易时段内持续刷新当日净值记录
+            if daytime(9, 30) <= now.time() <= daytime(15, 30):
+                try:
+                    result["nav"] = _record_nav(state, now, prices, real_mv)
+                except Exception as exc:
+                    _log(f"净值记录失败：{type(exc).__name__}: {exc}")
 
-        start, end = _decision_window()
-        if start <= now.time() <= end and state.get("last_decision_date") != now.date().isoformat():
-            try:
-                result["decision"] = _run_decisions(state, now, holdings, prices, real_mv)
-                _save_state(state)
-                # The account state is durable now, so the audit trail may
-                # safely record the trades it applied.
-                _flush_pending_journal()
-            except Exception as exc:
-                _log(f"决策执行失败：{type(exc).__name__}: {exc}")
-                result["decision_error"] = f"{type(exc).__name__}: {exc}"
-        return result
+            start, end = _decision_window()
+            if start <= now.time() <= end and state.get("last_decision_date") != now.date().isoformat():
+                try:
+                    result["decision"] = _run_decisions(state, now, holdings, prices, real_mv)
+                    # Persist both the account mutation and its audit payload first.
+                    _save_state(state)
+                    _flush_pending_journal(state)
+                    # Clearing the durable retry queue is a separate, idempotent step.
+                    _save_state(state)
+                except Exception as exc:
+                    _log(f"决策执行失败：{type(exc).__name__}: {exc}")
+                    result["decision_error"] = f"{type(exc).__name__}: {exc}"
+            return result
 
 
 # ---------------------------------------------------------------------------
@@ -872,12 +938,13 @@ def payload() -> Dict[str, Any]:
         if STATE.get("enabled") and callable(STATE.get("quotes_fn")) and callable(STATE.get("portfolio_fn")):
             lock: threading.Lock = STATE.get("lock") or threading.Lock()
             with lock:
-                state = _load_state()
-                if state is None:
-                    try:
-                        state = _initialize(now)
-                    except Exception as exc:
-                        _log(f"惰性初始化失败：{type(exc).__name__}: {exc}")
+                with _account_file_lock():
+                    state = _load_state()
+                    if state is None:
+                        try:
+                            state = _initialize(now)
+                        except Exception as exc:
+                            _log(f"惰性初始化失败：{type(exc).__name__}: {exc}")
     if state is None:
         base.update(
             {

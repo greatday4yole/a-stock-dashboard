@@ -15,6 +15,10 @@ const PERSONAL_INDEX_PERIOD_LABELS = Object.freeze({
   month: { singular: "月", kline: "月K线", detail: "每月", pnlLabel: "本月盈亏" },
 });
 const RISK_INTERVAL_MS = 30_000;
+// 回本测算是纯统计量，不需要跟随 5 秒行情刷新；5 分钟足以反映盘中变化且避免
+// 每次轮询都重跑 2 万条蒙特卡洛路径。
+const BREAKEVEN_INTERVAL_MS = 5 * 60_000;
+const BREAKEVEN_REQUEST_TIMEOUT_MS = 45_000;
 const NEWS_INTERVAL_MS = 5 * 60_000;
 const SCHOOL_SIGNAL_INTERVAL_MS = 5 * 60_000;
 const HEALTH_INTERVAL_MS = 60_000;
@@ -26,6 +30,25 @@ const RISK_REQUEST_TIMEOUT_MS = 25_000;
 const DECISION_REQUEST_TIMEOUT_MS = 45_000;
 const STOCK_CHART_CACHE_TTL_MS = 15_000;
 const STOCK_CHART_HOVER_CLOSE_MS = 180;
+// 图表接口的取数时间不固定：缓存冷启动要拉全历史日K（新浪美股一次 300+KB），
+// 且服务端按标的串行构建，首屏那批并发请求会排在前面。用通用的 9 秒超时会
+// 把"正在加载"直接掐成失败，悬浮看 K 线于是经常拿不到图。
+const STOCK_CHART_REQUEST_TIMEOUT_MS = 30_000;
+// 最近的指针位置：列表重绘会换掉触发器节点，浏览器随之派发 pointerout，
+// 需要靠真实指针位置判断"人是不是还停在图上"。
+const lastPointerPosition = { x: Number.NaN, y: Number.NaN };
+// 指针自上次 pointerout 起有没有真的移动过。列表重绘/其它面板加载会把触发器
+// 从指针底下挪走，浏览器照样派发 pointerout——这时人根本没离开，只是布局动了。
+let pointerMovedSinceOut = false;
+// 上一次被处理的 pointerover 的坐标：布局变化会让指针"落"到另一个触发器上
+// （坐标没变），这种不算人真的移过去了。
+let lastHandledHover = { x: Number.NaN, y: Number.NaN };
+
+function pointerMovedSinceLastHover(x, y) {
+  const moved = !(lastHandledHover.x === x && lastHandledHover.y === y);
+  lastHandledHover = { x, y };
+  return moved;
+}
 const STOCK_CHART_MAX_KLINE_POINTS = 260;
 const STOCK_CHART_MAX_KLINE_FETCH_POINTS = 500;
 const STOCK_CHART_MAX_INTRADAY_POINTS = 120;
@@ -66,6 +89,9 @@ const INDEX_INTRADAY_SYMBOLS = Object.freeze([
   "sh000001", "sz399001", "sz399006", "sh000688", "sh000300", "sh000905", "sh000852",
 ]);
 const INDEX_INTRADAY_REFRESH_MS = 120_000;
+// 宽基ETF监控（位于原「全球参考」英国/德法位置）：4 只核心宽基ETF 的
+// 分时走势 + 成交量变化（量较昨日全天）。后端 20s 缓存，这里 20s 轮询。
+const ETF_BROAD_REFRESH_MS = 20_000;
 // 先行指标（A50 + 期权 IV/PCR + 两融 + 北向 + 涨跌停 + 股指基差 + 货币市场 + 盘口）：
 // 每 8 秒拉一次；每个可得因子前端累积出分时曲线显示在卡片上。
 // 期权 IV 冷计算较重，后端自带缓存，5-10 秒轮询可命中缓存。
@@ -102,34 +128,236 @@ const GLOBAL_CHART_SYMBOLS = new Set([
   "usNDX", "hkHSTECH", "usSOXX", "usSMH", "usIWM", "usVIXY",
   "usNVDA", "usMU", "usTSM", "usASML", "usAMD", "usAVGO", "usQCOM",
   "usINTC", "usAMAT", "usLRCX", "usKLAC", "usARM", "usMRVL",
-  "usWDC", "usSTX", "usSNDK",
+  "usWDC", "usSTX", "usSNDK", "usPYPL",
   "b_SAMSUNG", "b_TWII",
   // 隔夜全球标的（与后端 EM_OVERNIGHT_INSTRUMENTS / INDEX_CHART_INSTRUMENTS 对应）。
   "b_FTSE", "b_GDAXI", "b_FCHI", "b_CL", "b_GC", "b_SI", "b_HG",
   "b_MSFT", "b_META", "b_NVDA", "b_GOOGL", "b_AAPL", "b_AMZN", "b_TSLA",
-  "b_SNDK", "b_STX", "b_WDC", "b_MU", "b_SKHYNIX",
+  "b_SNDK", "b_STX", "b_WDC", "b_MU", "b_SKHYNIX", "b_PYPL",
+  "b_TSM", "b_ASML", "b_AMD", "b_AVGO", "b_QCOM", "b_INTC", "b_AMAT",
+  "b_LRCX", "b_KLAC", "b_ARM", "b_MRVL", "b_SOXX", "b_SMH",
+  "b_HSI", "b_HSTECH", "b_INX", "b_IXIC", "b_NDX", "b_DJI", "b_IWM", "b_VIXY",
+  "b_TW2330", "b_TW2454", "b_TW3711", "b_TW2303", "b_TW2379", "b_TW3034",
+  "b_TW2408", "b_TW2344", "b_TW5347", "b_TW6770", "b_TW2449", "b_TW3661",
   "b_RKLB", "b_LUNR", "b_ASTS",
   "b_COP", "b_EOG", "b_CVX", "b_XOM",
   "b_LI", "b_NIO", "b_PDD", "b_XPEV", "b_JD", "b_BABA", "b_TCOM", "b_TCEHY",
-  "b_NTES", "b_BIDU", "b_BILI",
+  "b_NTES", "b_BILI",
 ]);
 
-// 隔夜全球标的的分组展示顺序（与后端 EM_OVERNIGHT_INSTRUMENTS 的 group 字段对应）。
-const OVERNIGHT_GROUP_ORDER = ["欧股指数", "商品", "美股科技", "存储链", "太空概念", "油气", "中概股"];
+// 迁移标的必须始终出现在隔夜模块，不因相关度暂无数据而消失。服务端逐行
+// 带 featured=true；这里的集合同时兼容旧缓存载荷。
+const OVERNIGHT_FEATURED_SYMBOLS = new Set([
+  "b_SNDK", "b_STX", "b_WDC", "b_MU", "b_NVDA", "b_PYPL",
+  "b_TSM", "b_ASML", "b_AMD", "b_AVGO", "b_QCOM", "b_INTC", "b_AMAT",
+  "b_LRCX", "b_KLAC", "b_ARM", "b_MRVL", "b_SOXX", "b_SMH",
+  "b_SKHYNIX", "b_SAMSUNG", "b_KOSPI", "b_TWII",
+  "b_NKY", "b_HSI", "b_HSTECH", "b_INX", "b_IXIC", "b_NDX", "b_DJI", "b_IWM", "b_VIXY",
+  "b_TW2330", "b_TW2454", "b_TW3711", "b_TW2303", "b_TW2379", "b_TW3034",
+  "b_TW2408", "b_TW2344", "b_TW5347", "b_TW6770", "b_TW2449", "b_TW3661",
+]);
 
-// 隔夜标的与持仓（信用+普通账户市值加权）的相关度快照：2026-10-14 基于近 180
-// 个交易日日收益率本地计算。|同日相关|≥0.15 的卡片加 ★ 高亮；负相关（如雪佛龙）
-// 实为对冲项，悬浮提示中注明。完整矩阵见会话记录，此处只保留高亮阈值内的标的。
+// AI / 存储核心：与「与持仓高相关」共用同一套 ★ 高亮（is-correlated）。
+// 判断依据是分组（存储链、半导体、台股半导体）或显式 ai_core 标记，
+// 不是名称关键词。后端 EM_OVERNIGHT_INSTRUMENTS 持同一口径；这里保留一份
+// 镜像以兼容旧缓存载荷。苹果/特斯拉/PayPal/中概/商品不在其中。
+const AI_CORE_OVERNIGHT_GROUPS = new Set([
+  "存储链", "半导体/芯片", "半导体/芯片指数", "台湾半导体",
+]);
+const AI_CORE_OVERNIGHT_SYMBOLS = new Set([
+  "b_SNDK", "b_STX", "b_WDC", "b_MU", "b_NVDA", "b_MSFT", "b_META", "b_GOOGL", "b_AMZN",
+  "b_TSM", "b_ASML", "b_AMD", "b_AVGO", "b_QCOM", "b_INTC", "b_AMAT",
+  "b_LRCX", "b_KLAC", "b_ARM", "b_MRVL", "b_SOXX", "b_SMH",
+  "b_SKHYNIX", "b_SAMSUNG", "b_KOSPI", "b_TWII",
+  "b_TW2330", "b_TW2454", "b_TW3711", "b_TW2303", "b_TW2379", "b_TW3034",
+  "b_TW2408", "b_TW2344", "b_TW5347", "b_TW6770", "b_TW2449", "b_TW3661",
+]);
+
+function isAiCoreOvernightMarket(market) {
+  const symbol = normalizeChartSymbol(String(market?.symbol || ""));
+  if (AI_CORE_OVERNIGHT_SYMBOLS.has(symbol)) return true;
+  return AI_CORE_OVERNIGHT_GROUPS.has(String(market?.group || ""));
+}
+
+// 两个海外模块共用同一套分组和顺序：与北京时间时差相同的市场合并成一组，
+// 统一按亚太 → 欧洲 → 美国推进（日本/韩国、台湾/香港同组）；同组内保持
+// 后端/原始行情顺序。未知美股代码归入纽约。
+const MARKET_TIMEZONE_GROUPS = Object.freeze([
+  {
+    id: "northeast_asia",
+    label: "日本 / 韩国 · 东京/首尔时区",
+    timeZone: "Asia/Tokyo",
+    symbols: new Set(["b_NKY", "b_KOSPI", "b_SKHYNIX", "b_SAMSUNG"]),
+  },
+  {
+    id: "greater_china",
+    label: "中国台湾 / 中国香港 · 台北/香港时区",
+    timeZone: "Asia/Taipei",
+    symbols: new Set([
+      "b_TWII", "b_TW2330", "b_TW2454", "b_TW3711", "b_TW2303", "b_TW2379",
+      "b_TW3034", "b_TW2408", "b_TW2344", "b_TW5347", "b_TW6770", "b_TW2449",
+      "b_TW3661", "hkHSI", "hkHSTECH", "b_HSI", "b_HSTECH",
+    ]),
+  },
+  { id: "uk", label: "英国 · 伦敦时区", timeZone: "Europe/London", symbols: new Set(["b_FTSE"]) },
+  { id: "europe", label: "德国 / 法国 · 中欧时区", timeZone: "Europe/Paris", symbols: new Set(["b_GDAXI", "b_FCHI"]) },
+  { id: "us", label: "美国 · 纽约时区", timeZone: "America/New_York", symbols: new Set() },
+]);
+const MARKET_TIMEZONE_BY_SYMBOL = new Map();
+for (const group of MARKET_TIMEZONE_GROUPS) {
+  for (const symbol of group.symbols) MARKET_TIMEZONE_BY_SYMBOL.set(symbol, group);
+}
+
+function marketTimezoneGroup(symbol) {
+  const normalized = normalizeChartSymbol(String(symbol || ""));
+  return MARKET_TIMEZONE_BY_SYMBOL.get(normalized)
+    || MARKET_TIMEZONE_GROUPS[MARKET_TIMEZONE_GROUPS.length - 1];
+}
+
+function timeZoneUtcOffsetMinutes(timeZone, at = new Date()) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      timeZoneName: "longOffset",
+    }).formatToParts(at);
+    const value = parts.find((part) => part.type === "timeZoneName")?.value || "";
+    const match = /^(?:GMT|UTC)(?:([+-])(\d{1,2})(?::?(\d{2}))?)?$/.exec(value);
+    if (!match) return null;
+    if (!match[1]) return 0;
+    const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
+    return match[1] === "-" ? -minutes : minutes;
+  } catch {
+    return null;
+  }
+}
+
+function beijingTimeDifferenceHours(timeZone, at = new Date()) {
+  const target = timeZoneUtcOffsetMinutes(timeZone, at);
+  const beijing = timeZoneUtcOffsetMinutes("Asia/Shanghai", at);
+  if (target === null || beijing === null) return null;
+  return (target - beijing) / 60;
+}
+
+function timezoneDifferenceLabel(timeZone, at = new Date()) {
+  const hours = beijingTimeDifferenceHours(timeZone, at);
+  if (hours === null) return "";
+  if (Math.abs(hours) < 1e-9) return "与北京同时区";
+  const direction = hours > 0 ? "快" : "慢";
+  const absolute = Math.abs(hours);
+  const wholeHours = Math.floor(absolute);
+  const minutes = Math.round((absolute - wholeHours) * 60);
+  const duration = [
+    wholeHours ? `${wholeHours}小时` : "",
+    minutes ? `${minutes}分钟` : "",
+  ].filter(Boolean).join("");
+  return `比北京${direction}${duration}`;
+}
+
+function marketTimezoneLabel(group, at = new Date()) {
+  const difference = timezoneDifferenceLabel(group?.timeZone, at);
+  return difference ? `${group.label} · ${difference}` : String(group?.label || "");
+}
+
+function groupMarketsByTimezone(rows) {
+  const buckets = new Map(MARKET_TIMEZONE_GROUPS.map((group) => [group.id, []]));
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const group = marketTimezoneGroup(row?.symbol);
+    buckets.get(group.id).push(row);
+  }
+  return MARKET_TIMEZONE_GROUPS
+    .map((group) => ({ ...group, rows: buckets.get(group.id) }))
+    .filter((group) => group.rows.length > 0);
+}
+
+// 同一证券在隔夜清单里可能使用 b_ 前缀、全球参考使用 us_ 前缀；代码尾部
+// 与中文名一起作为去重键，避免两块重复展示。
+function marketTickerIdentity(value) {
+  const symbol = normalizeChartSymbol(String(value || "")).toUpperCase();
+  if (/^US[A-Z0-9.]+$/.test(symbol)) return symbol.slice(2);
+  if (/^HK[A-Z0-9.]+$/.test(symbol)) return symbol.slice(2);
+  if (symbol.startsWith("B_")) return symbol.slice(2);
+  return symbol;
+}
+
+function marketDedupKeys(market) {
+  const symbol = String(market?.symbol || "");
+  const normalized = normalizeChartSymbol(symbol);
+  return [
+    overnightDisplayKey(symbol),
+    overnightDisplayKey(normalized),
+    overnightDisplayKey(market?.name),
+    overnightDisplayKey(marketTickerIdentity(symbol)),
+  ].filter(Boolean);
+}
+
+function filterGlobalsForOvernight(globals, overnightRows) {
+  const overnightKeys = new Set();
+  for (const market of Array.isArray(overnightRows) ? overnightRows : []) {
+    for (const key of marketDedupKeys(market)) overnightKeys.add(key);
+  }
+  return (Array.isArray(globals) ? globals : []).filter((row) => {
+    if (row.symbol === "hf_CL" || row.symbol === "hf_GC") return false;
+    return marketDedupKeys(row).every((key) => !overnightKeys.has(key));
+  });
+}
+
+// 隔夜标的与持仓（信用+普通账户市值加权 = 个人指数口径）的相关度快照。
+// 2026-10-22 快照：近 180 个组合交易日的日收益率皮尔逊相关，由
+// scripts/overnight_correlation.py 一键重算（组合序列取个人指数日K；隔夜标的
+// 日K取 Naver/东财 push2his/新浪美股）。
+//   same = corr(隔夜标的 t 日收益, 组合 t 日收益)
+//   next = corr(隔夜标的 t 日收益, 组合 t+1 交易日收益)
+// |same| ≥ 0.15 才入表并加 ★ 高亮；负相关（如 SK海力士/三星的 next 项）为
+// 对冲含义，悬浮提示中注明。本表是「存储链 + AI 链」精选：德指/法指/黄金/
+// 阿里巴巴/Rocket Lab 等同样越过阈值的宏观品种未纳入，以免单行过长。
+//
+// 这是**兜底**快照：服务端会用同一口径重算并随 /api/quotes 一起下发
+// （payload.overnight_correlation），页面优先用重算值，取不到才回落到这里。
 const OVERNIGHT_PORTFOLIO_CORRELATION = {
-  b_SKHYNIX: { same: 0.35, next: -0.07 },
-  b_WDC: { same: 0.19, next: 0.18 },
-  b_SNDK: { same: 0.18, next: 0.15 },
-  b_STX: { same: 0.17, next: 0.15 },
-  b_NVDA: { same: 0.18, next: 0.09 },
-  b_BIDU: { same: 0.17, next: 0.13 },
-  b_MU: { same: 0.16, next: 0.11 },
-  b_TSLA: { same: 0.15, next: 0.08 },
+  b_SKHYNIX: { same: 0.53, next: -0.11 },
+  b_SAMSUNG: { same: 0.46, next: -0.07 },
+  b_WDC: { same: 0.29, next: 0.26 },
+  b_SNDK: { same: 0.28, next: 0.25 },
+  b_NVDA: { same: 0.28, next: 0.12 },
+  b_TSLA: { same: 0.27, next: 0.11 },
+  b_STX: { same: 0.26, next: 0.22 },
+  b_MU: { same: 0.24, next: 0.17 },
 };
+
+// 隔夜相关度阈值：只有 |同日相关| 越过它的标的才进入「隔夜全球标的」。
+const OVERNIGHT_CORRELATION_THRESHOLD = 0.15;
+
+// 服务端重算的相关度快照 → 运行时相关度表；内置快照兜底。
+function applyOvernightCorrelation(payload) {
+  const root = rootObject(payload);
+  const snapshot = asObject(root.overnightCorrelation || root.overnight_correlation);
+  const correlation = asObject(snapshot.correlation);
+  if (!Object.keys(correlation).length) return;
+  state.overnightCorrelation = correlation;
+  state.overnightCorrelationAsOf = String(pick(snapshot, ["as_of", "asOf"]) || "");
+}
+
+function overnightCorrelationTable() {
+  const table = { ...OVERNIGHT_PORTFOLIO_CORRELATION };
+  const live = state.overnightCorrelation;
+  if (!live || typeof live !== "object") return table;
+  for (const [symbol, value] of Object.entries(live)) {
+    const item = asObject(value);
+    const same = firstNumber(pickNumber(item, ["same"]));
+    const next = firstNumber(pickNumber(item, ["next"]));
+    if (!isFiniteNumber(same) || !isFiniteNumber(next)) continue;
+    table[symbol] = { same, next };
+  }
+  return table;
+}
+
+function overnightCorrelationText(correlation) {
+  if (!correlation) return "";
+  const same = correlation.same >= 0 ? "+" : "";
+  const next = correlation.next >= 0 ? "+" : "";
+  const hedge = correlation.same < 0 ? "（负相关，对冲项）" : "";
+  return `与持仓相关度 同日${same}${correlation.same.toFixed(2)}/隔夜${next}${correlation.next.toFixed(2)}${hedge}`;
+}
 const INDEX_ALIASES = {
   "000001.SH": "上证综指", "sh000001": "上证综指", "1A0001": "上证综指", 上证指数: "上证综指",
   "399001.SZ": "深证成指", "sz399001": "深证成指",
@@ -207,6 +435,7 @@ const COMPARE_INTERVAL_MS = 15_000;
 const state = {
   quotePayload: null,
   riskPayload: null,
+  breakeven: null,
   newsPayload: null,
   marketNewsPayload: null,
   healthPayload: null,
@@ -223,10 +452,16 @@ const state = {
   markets: [],
   breadth: [],
   globals: [],
+  etfBroad: null,
+  etfBroadLoading: false,
+  etfBroadError: "",
+  etfBroadReceivedAt: 0,
   overnight: [],
+  overnightCorrelation: null,
+  overnightCorrelationAsOf: "",
+  overnightGridSignature: "",
   news: [],
   marketNews: [],
-  selectedSymbol: "all",
   selectedPnlSymbol: "total",
   intradayPnlFilterKey: "",
   positionSortKey: "dayPnl",
@@ -252,6 +487,7 @@ const state = {
   dailyPnlHistoryBaseAgeSeconds: 0,
   quoteError: "",
   riskError: "",
+  breakevenError: "",
   newsError: "",
   marketNewsError: "",
   intradayPnlError: "",
@@ -260,6 +496,7 @@ const state = {
   decisionError: "",
   quoteLoading: false,
   riskLoading: false,
+  breakevenLoading: false,
   newsLoading: false,
   healthLoading: false,
   decisionLoading: false,
@@ -302,12 +539,18 @@ const state = {
   personalIndexPeriod: "day",
   decisionReceivedAt: 0,
   manualRefreshing: false,
+  refreshAllGeneration: null,
+  viewGeneration: 0,
+  viewAbortController: null,
+  quoteRound: 0,
   newsRetryTimer: null,
   renderedMarketNewsFingerprint: "",
   stockChartCache: new Map(),
   stockChartPending: new Map(),
   positionIntradayCache: new Map(),
   positionIntradayPending: new Map(),
+  positionIntradayAttempts: new Map(),
+  positionIntradayErrors: new Map(),
   // 主要市场指数分时：首屏并发加载，之后每只 120s 均匀错峰刷新
   indexIntraday: { cache: new Map(), pending: new Map(), started: false },
   // 先行指标（A50期货 + 期权PCR/IV），后端已带缓存与容错
@@ -320,6 +563,12 @@ const state = {
   // 衍生品风险仪表盘：因子科学性审查 + 观点逐条核查（后端已做口径升级与取数核对）
   derivativesRegime: null,
   derivativesRegimeLoading: false,
+  // 持仓最新财报：6 小时才变一次，独立于 5 秒行情轮询单独拉取。
+  fundamentals: null,
+  fundamentalsLoading: false,
+  fundamentalsRequestedAt: 0,
+  // 持仓表「重要新闻」列的浮层锚点（点击日期后显示当天全部标题）。
+  newsTooltipAnchor: null,
   // 做T信号明细区：默认折叠；触发/了结时自动展开；用户手动点过后不再自动干预。
   aggTDetailExpanded: false,
   aggTDetailManual: false,
@@ -358,7 +607,6 @@ document.addEventListener("DOMContentLoaded", init);
 
 function init() {
   cacheElements();
-  syncNewsFilter();
   bindEvents();
   els.maskAmounts.checked = state.maskAmounts;
   renderPortfolioTabs();
@@ -370,6 +618,7 @@ function init() {
   renderDailyPnlHistory();
   renderPersonalIndex();
   renderRisk();
+  renderBreakeven();
   renderMarketNews();
   renderDecisionModules();
   updateFreshness();
@@ -384,6 +633,7 @@ function init() {
   scheduleDailyPnlHistory();
   schedulePersonalIndex();
   scheduleRisk();
+  scheduleBreakeven();
   scheduleNews();
   scheduleHealth();
   scheduleCompare();
@@ -391,18 +641,24 @@ function init() {
   scheduleSchoolSignals();
   void refreshLeadingIndicators();
   window.setInterval(() => void refreshLeadingIndicators(), LEADING_INDICATORS_REFRESH_MS);
+  void refreshEtfBroad();
+  window.setInterval(() => void refreshEtfBroad(), ETF_BROAD_REFRESH_MS);
   void refreshDerivativesRegime();
   window.setInterval(() => void refreshDerivativesRegime(), DERIVATIVES_REFRESH_MS);
+  startFundamentalsScheduler();
 }
 
 function cacheElements() {
   const ids = [
     "connection-status", "market-phase", "freshness-text", "mask-amounts", "refresh-button",
-    "notice-bar", "quote-source", "market-grid", "breadth-grid", "global-grid", "overnight-grid", "summary-grid",
+    "notice-bar", "quote-source", "market-grid", "breadth-grid", "etf-broad-grid", "etf-broad-meta", "overnight-grid", "summary-grid",
+    "section-nav",
     "leading-grid", "leading-meta",
     "portfolio-coverage", "risk-state", "risk-generated", "risk-context", "risk-metrics",
     "risk-breaches", "risk-actions", "positions-count", "positions-account-state", "positions-body", "news-symbol-filter",
-    "news-source", "news-count", "news-list", "health-text", "market-regime",
+    "breakeven-meta", "breakeven-summary", "breakeven-alert", "breakeven-scenarios",
+    "breakeven-timeline", "breakeven-positions", "breakeven-note",
+    "health-text", "market-regime",
     "market-news-state", "market-news-meta", "market-news-list",
     "market-state-score", "market-state-style", "market-state-message", "market-state-meta",
     "events-state", "events-meta", "events-list", "opportunities-state",
@@ -438,7 +694,10 @@ function cacheElements() {
     "school-signal-accuracy", "school-signal-events",
     "derivatives-state", "derivatives-meta", "derivatives-factors",
     "derivatives-readings", "derivatives-checks", "derivatives-check-summary",
-    "stock-chart-popover", "stock-chart-title", "stock-chart-meta", "stock-chart-close",
+    "derivatives-monitor-summary",
+    "school-header-time",
+    "stock-chart-popover", "stock-chart-title", "stock-chart-meta", "stock-chart-quote", "stock-chart-close",
+    "news-tooltip",
     "stock-chart-kline", "stock-chart-kline-empty", "stock-chart-intraday", "stock-chart-intraday-empty",
     "stock-chart-note", "stock-chart-kline-caption", "stock-chart-period-toggle",
     "stock-chart-indicators",
@@ -464,6 +723,7 @@ function bindEvents() {
     try { window.localStorage.setItem("stock-dashboard-mask-amounts", state.maskAmounts ? "1" : "0"); } catch (_) { /* storage may be disabled */ }
     renderSummary();
     renderRisk();
+    renderBreakeven();
     renderPositions();
     renderIntradayPnl();
     renderIntradayHistory();
@@ -494,12 +754,6 @@ function bindEvents() {
   });
   els.portfolioEditor.addEventListener("pointerdown", (event) => {
     if (event.target === els.portfolioEditor) closePortfolioEditor();
-  });
-
-  els.newsSymbolFilter.addEventListener("change", () => {
-    state.selectedSymbol = els.newsSymbolFilter.value;
-    renderNews();
-    renderPositions();
   });
 
   if (els.personalIndexPeriodToggle) {
@@ -586,7 +840,6 @@ function bindEvents() {
       } else {
         showStockChart(chartTrigger, true);
       }
-      selectNewsSymbol(symbol);
       return;
     }
 
@@ -611,14 +864,27 @@ function bindEvents() {
       return;
     }
 
-    const row = event.target.closest(".position-row");
-    if (row?.dataset.symbol) selectNewsSymbol(row.dataset.symbol);
+    // 重要新闻列：点日期浮出当天全部标题（独立面板已移除，这里是唯一入口）。
+    const newsChip = event.target.closest(".news-date-chip");
+    if (newsChip) {
+      event.stopPropagation();
+      const group = findNewsGroupForChip(newsChip);
+      if (!group) return;
+      if (state.newsTooltipAnchor === newsChip && els.newsTooltip && !els.newsTooltip.hidden) {
+        closeNewsTooltip();
+      } else {
+        showNewsTooltip(newsChip, group);
+      }
+      return;
+    }
+
   });
 
   els.positionsTable.addEventListener("pointerover", (event) => {
     if (event.pointerType === "touch") return;
     const trigger = event.target.closest(".stock-chart-trigger");
     if (!trigger || trigger.contains(event.relatedTarget)) return;
+    if (!pointerMovedSinceLastHover(event.clientX, event.clientY)) return;
     cancelStockChartClose();
     showStockChart(trigger, false);
   });
@@ -626,6 +892,7 @@ function bindEvents() {
   els.positionsTable.addEventListener("pointerout", (event) => {
     const trigger = event.target.closest(".stock-chart-trigger");
     if (!trigger || trigger.contains(event.relatedTarget) || els.stockChartPopover.contains(event.relatedTarget)) return;
+    pointerMovedSinceOut = false;
     scheduleStockChartClose();
   });
 
@@ -645,9 +912,38 @@ function bindEvents() {
     scheduleStockChartClose();
   });
 
-  // 主要市场 / 全球参考 / 隔夜全球标的卡片复用持仓行情的图表弹层交互
-  // （悬停预览、点击固定）。与持仓表唯一的差异：点击指数卡片不筛选新闻。
-  for (const container of [els.marketGrid, els.globalGrid, els.overnightGrid]) {
+  // 重要新闻浮层：点别处或按 Esc 收起（点日期本身由上面的委托处理器负责）。
+  document.addEventListener("click", (event) => {
+    if (!els.newsTooltip || els.newsTooltip.hidden) return;
+    if (els.newsTooltip.contains(event.target) || event.target.closest(".news-date-chip")) return;
+    closeNewsTooltip();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && els.newsTooltip && !els.newsTooltip.hidden) closeNewsTooltip();
+  });
+  window.addEventListener("resize", () => closeNewsTooltip());
+  // 只在页面级滚动时收起浮层。capture=true 会把表格容器内部的滚动也捕获进来，
+  // 而点击按钮本身可能触发容器自动滚动，导致浮层刚打开就被关掉。
+  // 表格容器内部的横向/纵向滚动不关闭浮层，只重新贴到按钮下方：
+  // 点击按钮会让浏览器先把该行滚进视野，若此时关闭，用户会觉得「点了没反应」。
+  const repositionNewsTooltip = () => {
+    if (!els.newsTooltip || els.newsTooltip.hidden || !state.newsTooltipAnchor) return;
+    const rect = state.newsTooltipAnchor.getBoundingClientRect?.();
+    if (!rect) return;
+    if (rect.bottom < 0 || rect.top > window.innerHeight) {
+      closeNewsTooltip();
+      return;
+    }
+    const width = els.newsTooltip.offsetWidth || 320;
+    els.newsTooltip.style.left = `${Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - width - 8))}px`;
+    els.newsTooltip.style.top = `${rect.bottom + 6}px`;
+  };
+  window.addEventListener("scroll", repositionNewsTooltip, { passive: true, capture: true });
+  document.querySelector(".table-wrap")?.addEventListener("scroll", repositionNewsTooltip, { passive: true });
+
+  // 主要市场 / 隔夜标的复用持仓行情的图表弹层交互
+  // （悬停预览、点击固定）。
+  for (const container of [els.marketGrid, els.overnightGrid]) {
     if (!container) continue;
     container.addEventListener("click", (event) => {
       const chartTrigger = event.target.closest(".stock-chart-trigger");
@@ -664,12 +960,16 @@ function bindEvents() {
       if (event.pointerType === "touch") return;
       const trigger = event.target.closest(".stock-chart-trigger");
       if (!trigger || trigger.contains(event.relatedTarget)) return;
+      // 布局变化会让指针"落"到另一个触发器上（坐标没变），这时不要把弹层切到
+      // 不相干的标的去——人根本没移过去。
+      if (!pointerMovedSinceLastHover(event.clientX, event.clientY)) return;
       cancelStockChartClose();
       showStockChart(trigger, false);
     });
     container.addEventListener("pointerout", (event) => {
       const trigger = event.target.closest(".stock-chart-trigger");
       if (!trigger || trigger.contains(event.relatedTarget) || els.stockChartPopover.contains(event.relatedTarget)) return;
+      pointerMovedSinceOut = false;
       scheduleStockChartClose();
     });
     container.addEventListener("focusin", (event) => {
@@ -691,6 +991,17 @@ function bindEvents() {
   els.stockChartPopover.addEventListener("pointerenter", cancelStockChartClose);
   els.stockChartPopover.addEventListener("pointerleave", scheduleStockChartClose);
   els.stockChartClose.addEventListener("click", () => closeStockChart(true));
+
+  document.addEventListener("pointermove", (event) => {
+    lastPointerPosition.x = event.clientX;
+    lastPointerPosition.y = event.clientY;
+    pointerMovedSinceOut = true;
+    // 兜底关闭：布局把触发器挪走后 pointerout 已经派发过一次，指针再移动到
+    // 触发器和弹层之外时，这里把悬浮预览收掉。
+    if (state.stockChartPinned || !els.stockChartPopover || els.stockChartPopover.hidden) return;
+    if (pointerStillOnChartTrigger()) return;
+    closeStockChart();
+  }, { passive: true });
 
   if (els.stockChartPeriodToggle) {
     els.stockChartPeriodToggle.addEventListener("click", (event) => {
@@ -730,9 +1041,44 @@ function bindEvents() {
   });
 }
 
+function advanceViewGeneration() {
+  state.viewGeneration += 1;
+  state.viewAbortController?.abort();
+  state.viewAbortController = null;
+  state.refreshAllGeneration = null;
+  state.manualRefreshing = false;
+  for (const key of [
+    "quoteLoading", "decisionLoading", "intradayPnlLoading", "dailyPnlHistoryLoading",
+    "personalIndexLoading", "breakevenLoading", "riskLoading", "newsLoading", "compareLoading",
+  ]) state[key] = false;
+  state.paperT.loading = false;
+  state.paperT.historyLoading = false;
+  state.intradayHistory.loading = false;
+  state.positionIntradayAttempts.clear();
+  if (state.newsRetryTimer) window.clearTimeout(state.newsRetryTimer);
+  state.newsRetryTimer = null;
+}
+
+function viewAbortSignal() {
+  if (!state.viewAbortController && typeof AbortController !== "undefined") {
+    state.viewAbortController = new AbortController();
+  }
+  return state.viewAbortController?.signal;
+}
+
+function fetchViewJson(url, timeoutMs = REQUEST_TIMEOUT_MS) {
+  return fetchJson(url, timeoutMs, viewAbortSignal());
+}
+
+function viewIsCurrent(generation) {
+  return generation === state.viewGeneration;
+}
+
 async function refreshAll(manual = false) {
-  if (state.manualRefreshing) return;
+  const generation = state.viewGeneration;
+  if (state.manualRefreshing && state.refreshAllGeneration === generation) return;
   state.manualRefreshing = true;
+  state.refreshAllGeneration = generation;
   els.refreshButton.disabled = true;
   els.refreshButton.textContent = "刷新中";
   try {
@@ -747,8 +1093,13 @@ async function refreshAll(manual = false) {
     const personalIndexRequest = refreshPersonalIndex();
     const schoolSignalRequest = refreshSchoolSignals(manual);
     const unified = await refreshDecisionContext(manual);
+    if (!viewIsCurrent(generation)) return;
+    // 回本测算依赖风险快照的服务端结果，放在统一上下文之后单独触发；
+    // 它耗时明显长于行情轮询，因此不阻塞其它面板的渲染。
+    const breakevenRequest = refreshBreakeven(manual);
+    const etfBroadRequest = refreshEtfBroad(manual);
     if (unified) {
-      await Promise.allSettled([refreshHealth(), intradayPnlRequest, intradayHistoryRequest, dailyPnlHistoryRequest, personalIndexRequest, schoolSignalRequest]);
+      await Promise.allSettled([refreshHealth(), intradayPnlRequest, intradayHistoryRequest, dailyPnlHistoryRequest, personalIndexRequest, schoolSignalRequest, breakevenRequest, etfBroadRequest]);
     } else {
       await Promise.allSettled([
         refreshQuotes(),
@@ -760,14 +1111,21 @@ async function refreshAll(manual = false) {
         dailyPnlHistoryRequest,
         personalIndexRequest,
         schoolSignalRequest,
+        breakevenRequest,
+        etfBroadRequest,
       ]);
-      renderDecisionModules();
+      if (viewIsCurrent(generation)) renderDecisionModules();
     }
   } finally {
-    state.manualRefreshing = false;
-    els.refreshButton.disabled = false;
-    els.refreshButton.textContent = manual ? "已刷新" : "刷新";
-    if (manual) window.setTimeout(() => { els.refreshButton.textContent = "刷新"; }, 1_200);
+    if (state.refreshAllGeneration === generation) {
+      state.manualRefreshing = false;
+      state.refreshAllGeneration = null;
+      els.refreshButton.disabled = false;
+      els.refreshButton.textContent = manual ? "已刷新" : "刷新";
+      if (manual) window.setTimeout(() => {
+        if (viewIsCurrent(generation) && !state.manualRefreshing) els.refreshButton.textContent = "刷新";
+      }, 1_200);
+    }
   }
 }
 
@@ -776,21 +1134,24 @@ async function refreshDecisionContext(force = false) {
     // 统一决策快照当前只绑定主组合；自定义组合走单接口通道。
     return false;
   }
+  const generation = state.viewGeneration;
   if (state.decisionLoading) return Boolean(state.decisionPayload);
   state.decisionLoading = true;
   try {
-    const payload = await fetchJson(decisionContextRequestUrl(force), DECISION_REQUEST_TIMEOUT_MS);
+    const payload = await fetchViewJson(decisionContextRequestUrl(force), DECISION_REQUEST_TIMEOUT_MS);
+    if (!viewIsCurrent(generation)) return false;
     if (!payload || typeof payload !== "object") throw new Error("统一决策接口返回为空");
     applyDecisionContext(payload);
     state.decisionError = "";
     return true;
   } catch (error) {
+    if (!viewIsCurrent(generation)) return false;
     state.decisionError = friendlyError(error, "统一决策快照暂时不可用");
     renderDecisionModules();
     renderNotice();
     return false;
   } finally {
-    state.decisionLoading = false;
+    if (viewIsCurrent(generation)) state.decisionLoading = false;
   }
 }
 
@@ -816,14 +1177,15 @@ function applyDecisionContext(payload) {
   const quotes = root.quotes;
   if (quotes && typeof quotes === "object") {
     state.quotePayload = quotes;
+    state.quoteRound += 1;
     const quoteAdviceRaw = firstDefined(rootObject(quotes), ["position_advice", "positionAdvice"]);
     if (quoteAdviceRaw !== undefined) state.positionAdviceBySymbol = normalizeAdviceMapping(quoteAdviceRaw);
     state.positions = normalizePositions(quotes, state.positionAdviceBySymbol);
-    syncNewsFilter();
     state.markets = normalizeMarkets(quotes);
     state.breadth = normalizeBreadth(quotes);
     state.globals = normalizeGlobals(quotes);
     state.overnight = normalizeOvernight(quotes);
+    applyOvernightCorrelation(quotes);
     state.quoteReceivedAt = Date.now();
     state.quoteServerAt = extractTimestamp(quotes) || pick(asObject(root.as_of || root.asOf), ["quote"]);
     state.quoteBaseAgeSeconds = firstNumber(pickNumber(asObject(rootObject(quotes).cache), ["age_seconds", "ageSeconds"]), 0);
@@ -866,7 +1228,6 @@ function applyDecisionContext(payload) {
 
   renderQuoteSections();
   renderRisk();
-  renderNews();
   renderMarketNews();
   renderDecisionModules();
   renderSourceLabels();
@@ -874,20 +1235,23 @@ function applyDecisionContext(payload) {
 }
 
 async function refreshQuotes() {
+  const generation = state.viewGeneration;
   if (state.quoteLoading) return;
   state.quoteLoading = true;
   try {
-    const payload = await fetchJson(portfolioQuery("/api/quotes"));
+    const payload = await fetchViewJson(portfolioQuery("/api/quotes"));
+    if (!viewIsCurrent(generation)) return;
     if (payload && payload.ok === false) throw new Error(payload.error || payload.message || "行情接口返回失败");
     state.quotePayload = payload;
+    state.quoteRound += 1;
     const adviceRaw = firstDefined(rootObject(payload), ["position_advice", "positionAdvice"]);
     if (adviceRaw !== undefined) state.positionAdviceBySymbol = normalizeAdviceMapping(adviceRaw);
     state.positions = normalizePositions(payload, state.positionAdviceBySymbol);
-    syncNewsFilter();
     state.markets = normalizeMarkets(payload);
     state.breadth = normalizeBreadth(payload);
     state.globals = normalizeGlobals(payload);
     state.overnight = normalizeOvernight(payload);
+    applyOvernightCorrelation(payload);
     state.quoteReceivedAt = Date.now();
     state.quoteServerAt = extractTimestamp(payload);
     state.quoteBaseAgeSeconds = firstNumber(pickNumber(asObject(rootObject(payload).cache), ["age_seconds", "ageSeconds"]), 0);
@@ -898,37 +1262,43 @@ async function refreshQuotes() {
     // 避免金额停留在页面首次加载时的旧值。
     void refreshPortfolios();
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.quoteError = friendlyError(error, "行情暂时不可用");
     renderConnectionState();
     renderNotice();
   } finally {
-    state.quoteLoading = false;
+    if (viewIsCurrent(generation)) state.quoteLoading = false;
   }
 }
 
 async function refreshIntradayPnl(force = false) {
   if (compareActive()) return;
+  const generation = state.viewGeneration;
   if (state.intradayPnlLoading) return;
   state.intradayPnlLoading = true;
   try {
-    const payload = await fetchJson(
+    const payload = await fetchViewJson(
       portfolioQuery(force ? "/api/intraday-pnl?refresh=1" : "/api/intraday-pnl"),
       INTRADAY_PNL_REQUEST_TIMEOUT_MS,
     );
+    if (!viewIsCurrent(generation)) return;
     if (!payload || typeof payload !== "object") throw new Error("盘中盈亏接口返回为空");
     state.intradayPnlError = payload.ok === false
       ? String(payload.error || payload.message || "盘中盈亏暂不可用")
       : "";
     applyIntradayPnl(payload);
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.intradayPnlError = friendlyError(error, "盘中盈亏暂不可用");
   } finally {
-    state.intradayPnlLoading = false;
-    // Render after clearing the loading flag so a failed first request cannot
-    // leave the empty state permanently saying “正在获取…”.  When an older
-    // snapshot exists, renderIntradayPnl keeps that curve and adds the error
-    // to its note instead of blanking the chart.
-    renderIntradayPnl();
+    if (viewIsCurrent(generation)) {
+      state.intradayPnlLoading = false;
+      // Render after clearing the loading flag so a failed first request cannot
+      // leave the empty state permanently saying “正在获取…”.  When an older
+      // snapshot exists, renderIntradayPnl keeps that curve and adds the error
+      // to its note instead of blanking the chart.
+      renderIntradayPnl();
+    }
   }
 }
 
@@ -955,22 +1325,27 @@ function dailyPnlHistoryRequestUrl(force = false) {
 
 async function refreshDailyPnlHistory(force = false) {
   if (compareActive()) return;
+  const generation = state.viewGeneration;
   if (state.dailyPnlHistoryLoading) return;
   state.dailyPnlHistoryLoading = true;
   try {
-    const payload = await fetchJson(
+    const payload = await fetchViewJson(
       dailyPnlHistoryRequestUrl(force),
       DAILY_PNL_HISTORY_REQUEST_TIMEOUT_MS,
     );
+    if (!viewIsCurrent(generation)) return;
     if (!payload || typeof payload !== "object") throw new Error("每日盈亏历史接口返回为空");
     if (payload.ok === false) throw new Error(payload.error || payload.message || "每日盈亏历史暂不可用");
     applyDailyPnlHistory(payload);
     state.dailyPnlHistoryError = "";
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.dailyPnlHistoryError = friendlyError(error, "每日盈亏历史暂不可用");
   } finally {
-    state.dailyPnlHistoryLoading = false;
-    renderDailyPnlHistory();
+    if (viewIsCurrent(generation)) {
+      state.dailyPnlHistoryLoading = false;
+      renderDailyPnlHistory();
+    }
   }
 }
 
@@ -986,31 +1361,62 @@ function applyDailyPnlHistory(payload) {
   renderDailyPnlHistory();
 }
 
+async function refreshBreakeven(force = false) {
+  if (compareActive()) return;
+  const generation = state.viewGeneration;
+  if (state.breakevenLoading) return;
+  state.breakevenLoading = true;
+  try {
+    const payload = await fetchViewJson(
+      portfolioQuery(force ? "/api/breakeven?refresh=1" : "/api/breakeven"),
+      BREAKEVEN_REQUEST_TIMEOUT_MS,
+    );
+    if (!viewIsCurrent(generation)) return;
+    state.breakeven = payload;
+    state.breakevenError = "";
+  } catch (error) {
+    if (!viewIsCurrent(generation)) return;
+    state.breakevenError = friendlyError(error, "回本测算暂时不可用");
+  } finally {
+    if (viewIsCurrent(generation)) {
+      state.breakevenLoading = false;
+      renderBreakeven();
+    }
+  }
+}
+
 async function refreshRisk(force = false) {
   if (compareActive()) return;
+  const generation = state.viewGeneration;
   if (state.riskLoading) return;
   state.riskLoading = true;
   try {
-    const payload = await fetchJson(portfolioQuery(force ? "/api/risk?refresh=1" : "/api/risk"), RISK_REQUEST_TIMEOUT_MS);
+    const payload = await fetchViewJson(portfolioQuery(force ? "/api/risk?refresh=1" : "/api/risk"), RISK_REQUEST_TIMEOUT_MS);
+    if (!viewIsCurrent(generation)) return;
     state.riskPayload = payload;
     state.riskReceivedAt = Date.now();
     state.riskBaseAgeSeconds = firstNumber(pickNumber(asObject(rootObject(payload).cache), ["age_seconds", "ageSeconds"]), 0);
     state.riskError = "";
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.riskError = friendlyError(error, "风险快照暂时不可用");
   } finally {
-    state.riskLoading = false;
-    renderRisk();
-    renderNotice();
+    if (viewIsCurrent(generation)) {
+      state.riskLoading = false;
+      renderRisk();
+      renderNotice();
+    }
   }
 }
 
 async function refreshNews(force = false) {
   if (compareActive()) return;
+  const generation = state.viewGeneration;
   if (state.newsLoading) return;
   state.newsLoading = true;
   try {
-    const payload = await fetchJson(portfolioQuery(force ? "/api/news?refresh=1" : "/api/news"));
+    const payload = await fetchViewJson(portfolioQuery(force ? "/api/news?refresh=1" : "/api/news"));
+    if (!viewIsCurrent(generation)) return;
     if (payload && payload.ok === false) throw new Error(payload.error || payload.message || "新闻接口返回失败");
     state.newsPayload = payload;
     state.news = normalizeNews(payload);
@@ -1018,21 +1424,20 @@ async function refreshNews(force = false) {
     state.newsServerAt = extractTimestamp(payload);
     state.newsBaseAgeSeconds = firstNumber(pickNumber(rootObject(payload), ["cache_age_seconds", "cacheAgeSeconds"]), 0);
     state.newsError = "";
-    renderNews();
-    renderSourceLabels();
+      renderSourceLabels();
     renderNotice();
     if (state.newsRetryTimer) window.clearTimeout(state.newsRetryTimer);
     state.newsRetryTimer = payload.refreshing ? window.setTimeout(() => {
       state.newsRetryTimer = null;
-      if (!document.hidden) void refreshNews();
+      if (!document.hidden && viewIsCurrent(generation)) void refreshNews();
     }, 2_500) : null;
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.newsError = friendlyError(error, "新闻暂时不可用");
-    renderNews();
-    renderSourceLabels();
+      renderSourceLabels();
     renderNotice();
   } finally {
-    state.newsLoading = false;
+    if (viewIsCurrent(generation)) state.newsLoading = false;
   }
 }
 
@@ -1097,6 +1502,8 @@ function personalIndexRecords(payload) {
       ma5: firstNumber(row.ma5),
       ma10: firstNumber(row.ma10),
       ma20: firstNumber(row.ma20),
+      // 成交量：K线副图用。后端按 数量 × 当日成交量 累加，单位「股」。
+      volume: firstNumber(row.volume),
       composition: asObject(row.composition),
     };
     if (!record.date || !isFiniteNumber(record.close)) continue;
@@ -1221,20 +1628,25 @@ function selectPersonalIndexPeriod(period) {
 
 async function refreshPersonalIndex() {
   if (compareActive()) return;
+  const generation = state.viewGeneration;
   if (state.personalIndexLoading) return;
   state.personalIndexLoading = true;
   try {
-    const payload = await fetchJson(PERSONAL_INDEX_DATA_URL, PERSONAL_INDEX_REQUEST_TIMEOUT_MS);
+    const payload = await fetchViewJson(PERSONAL_INDEX_DATA_URL, PERSONAL_INDEX_REQUEST_TIMEOUT_MS);
+    if (!viewIsCurrent(generation)) return;
     if (!payload || typeof payload !== "object") throw new Error("个人指数数据返回为空");
     if (!personalIndexRecords(payload).length) throw new Error("个人指数数据缺少有效K线序列");
     state.personalIndexPayload = payload;
     state.personalIndexError = "";
     state.personalIndexReceivedAt = Date.now();
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.personalIndexError = friendlyError(error, "个人指数数据暂不可用");
   } finally {
-    state.personalIndexLoading = false;
-    renderPersonalIndex();
+    if (viewIsCurrent(generation)) {
+      state.personalIndexLoading = false;
+      renderPersonalIndex();
+    }
   }
 }
 
@@ -1430,6 +1842,11 @@ function personalIndexTooltipHtml(record) {
     html += `<span class="${todayClass}">涨跌: ${formatPct(record.pctChange)}</span>　`;
     html += `<span class="${todayClass}">当日盈亏: ${formatAmount(record.pnlToday, true)}</span><br/>`;
   }
+  if (isFiniteNumber(record.volume) && record.volume > 0) {
+    // 量纲是「持仓数量(股) × 当日成交量(手)」的合计，不是股数；
+    // 只给量级并注明口径，避免把它读成真实成交股数。
+    html += `成交量: ${(record.volume / 1e8).toFixed(2)}亿（持仓数×成交手）<br/>`;
+  }
   html += `组合市值: ${formatAmount(record.mv)}<br/>`;
   if (record.pnlCum != null) {
     const cumClass = record.pnlCum >= 0 ? "up" : "down";
@@ -1451,11 +1868,21 @@ function personalIndexChartOption(records) {
     showSymbol: false,
     lineStyle: { width: 1.2, color: palette.ma[index] },
   }));
-  // 下方柱状图 = 当日盈亏额（红涨绿跌，单位万元）
-  const pnlBars = records.map((record) => ({
-    value: record.pnlToday == null ? null : +(record.pnlToday / 10_000).toFixed(3),
-    itemStyle: { color: (record.pnlToday ?? 0) >= 0 ? palette.up : palette.down },
-  }));
+  // 副图 = 成交量柱，按常规炒股软件惯例：收 >= 开 用红，否则绿；缺失留空不补 0。
+  // 口径：后端 volume = Σ(持仓数量 × 当日成交量(手))，量纲为「股·手」，
+  // 不是成交股数，因此只按「亿」展示量级并在 tooltip / 说明里写明公式。
+  const volumeBars = records.map((record) => {
+    // volume 为 0 是历史数据缺口（2026-09-28 起有 18 个交易日缺量），不是"当天没成交"。
+    // 按缺失处理：留空、不画 0 柱，也不画假柱。
+    const hasVolume = isFiniteNumber(record.volume) && record.volume > 0;
+    const rising = isFiniteNumber(record.close) && isFiniteNumber(record.open)
+      ? record.close >= record.open
+      : true;
+    return {
+      value: hasVolume ? +(record.volume / 1e8).toFixed(4) : null,
+      itemStyle: { color: rising ? palette.up : palette.down },
+    };
+  });
   const zoomStart = Math.max(0, 100 - 40);
 
   return {
@@ -1478,8 +1905,8 @@ function personalIndexChartOption(records) {
     legend: { data: ["个人指数", "MA5", "MA10", "MA20"], top: 0, textStyle: { color: palette.muted, fontSize: 10 } },
     axisPointer: { link: [{ xAxisIndex: "all" }] },
     grid: [
-      { left: 56, right: 20, top: 34, height: "62%" },
-      { left: 56, right: 20, top: "76%", height: "14%" },
+      { left: 56, right: 20, top: 34, height: "58%" },
+      { left: 56, right: 20, top: "74%", height: "17%" },
     ],
     xAxis: [
       {
@@ -1510,8 +1937,11 @@ function personalIndexChartOption(records) {
       {
         gridIndex: 1,
         splitNumber: 2,
+        name: "量(亿)",
+        nameTextStyle: { color: palette.muted, fontSize: 9, align: "right" },
+        nameGap: 6,
         axisLabel: {
-          formatter: (value) => (state.maskAmounts ? "" : `${value.toFixed(1)}万`),
+          formatter: (value) => (value >= 1 ? `${value.toFixed(0)}亿` : `${(value * 10_000).toFixed(0)}万`),
           color: palette.muted,
           fontSize: 10,
         },
@@ -1531,11 +1961,11 @@ function personalIndexChartOption(records) {
       },
       ...maSeries,
       {
-        name: "当日盈亏",
+        name: "成交量",
         type: "bar",
         xAxisIndex: 1,
         yAxisIndex: 1,
-        data: pnlBars,
+        data: volumeBars,
         barWidth: "60%",
       },
     ],
@@ -1550,6 +1980,29 @@ const SCHOOL_ORDER = ["trend", "dow", "wyckoff"];
 const SCHOOL_LABELS = { trend: "趋势跟踪", dow: "道氏理论", wyckoff: "量价分析" };
 const SCHOOL_SHORT_LABELS = { trend: "趋势", dow: "道氏", wyckoff: "量价" };
 const SCHOOL_LEVEL_LABELS = { trigger: "今日触发", near: "接近触发", hold: "持仓中", avoid: "空仓等待" };
+
+function formatSchoolJudgedAt(value) {
+  // 判断时间用「今天 11:26 / 10-27 09:31」这种紧凑形式，列宽只有几十像素。
+  const parsed = parseDate(value);
+  if (!parsed) return "";
+  const now = new Date();
+  const sameDay = parsed.toDateString() === now.toDateString();
+  const pad = (n) => String(n).padStart(2, "0");
+  const clock = `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`;
+  return sameDay ? clock : `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${clock}`;
+}
+
+function schoolSignalTooltip(key, signal, holding, judgedAt, barDate) {
+  // 悬停同时说明：流派、状态、今日是否切换、判断时刻、依据的日K日期、明细提示。
+  const s = asObject(signal);
+  const lines = [
+    `${SCHOOL_LABELS[key] || key}：${holding ? "持仓中" : "空仓"}${s.switched_today ? " · 今日切换" : ""}`,
+    `判断时刻：${judgedAt ? (formatDateTime(judgedAt) || judgedAt) : "--"}`,
+    `依据日K：${barDate || "--"}（以收盘价确认，盘中为预估）`,
+  ];
+  if (s.hint) lines.push("", String(s.hint));
+  return lines.join("\n");
+}
 const SCHOOL_EVENT_LABELS = { buy_trigger: "买入触发", sell_trigger: "卖出触发", near_trigger: "接近触发" };
 
 async function refreshSchoolSignals(force = false) {
@@ -1676,6 +2129,13 @@ function scheduleNews() {
   }, NEWS_INTERVAL_MS);
 }
 
+function scheduleBreakeven() {
+  window.setTimeout(async () => {
+    if (!document.hidden) await refreshBreakeven();
+    scheduleBreakeven();
+  }, BREAKEVEN_INTERVAL_MS);
+}
+
 function scheduleRisk() {
   window.setTimeout(async () => {
     if (!document.hidden) {
@@ -1693,8 +2153,11 @@ function scheduleHealth() {
   }, HEALTH_INTERVAL_MS);
 }
 
-async function fetchJson(url, timeoutMs = REQUEST_TIMEOUT_MS) {
+async function fetchJson(url, timeoutMs = REQUEST_TIMEOUT_MS, viewSignal = undefined) {
   const controller = new AbortController();
+  const abortForViewChange = () => controller.abort();
+  if (viewSignal?.aborted) controller.abort();
+  else viewSignal?.addEventListener("abort", abortForViewChange, { once: true });
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" }, signal: controller.signal });
@@ -1703,10 +2166,16 @@ async function fetchJson(url, timeoutMs = REQUEST_TIMEOUT_MS) {
     if (!contentType.includes("json")) throw new Error("接口未返回 JSON");
     return await response.json();
   } catch (error) {
+    if (viewSignal?.aborted) {
+      const staleError = new Error("视图已切换");
+      staleError.name = "AbortError";
+      throw staleError;
+    }
     if (error && error.name === "AbortError") throw new Error("请求超时");
     throw error;
   } finally {
     window.clearTimeout(timeout);
+    viewSignal?.removeEventListener("abort", abortForViewChange);
   }
 }
 
@@ -1883,6 +2352,7 @@ function applyViewVisibility() {
   const compare = compareActive();
   if (els.portfolioView) els.portfolioView.hidden = compare;
   if (els.comparePanel) els.comparePanel.hidden = !compare;
+  if (els.sectionNav) els.sectionNav.hidden = compare;
   // 做T 决策中心是组合口径内容，比较视图下不适用。
   if (els.tCenterPanel) els.tCenterPanel.hidden = compare;
 }
@@ -1914,7 +2384,6 @@ function clearPortfolioViewState() {
   // 做T计划走 /api/tomorrow-plans（主组合口径，不随组合切换失效），
   // 这里只重置签名，让底部做T参考表按新组合的持仓重新铺行。
   state.tPlanSignature = "";
-  state.selectedSymbol = "all";
   state.selectedPnlSymbol = "total";
   state.quoteError = "";
   state.riskError = "";
@@ -1927,6 +2396,7 @@ function clearPortfolioViewState() {
 function switchPortfolio(portfolioId) {
   if (portfolioId === state.activePortfolioId) return;
   state.activePortfolioId = portfolioId;
+  advanceViewGeneration();
   persistActivePortfolio();
   clearPortfolioViewState();
   renderPortfolioTabs();
@@ -1937,7 +2407,6 @@ function switchPortfolio(portfolioId) {
   renderDailyPnlHistory();
   renderPersonalIndex();
   renderRisk();
-  renderNews();
   renderDecisionModules();
   renderCompare();
   void refreshAll(true);
@@ -1987,22 +2456,27 @@ function rankBadge(rank, total) {
 }
 
 async function refreshCompare(force = false) {
+  const generation = state.viewGeneration;
   if (state.compareLoading) return;
   state.compareLoading = true;
   try {
-    const payload = await fetchJson(
+    const payload = await fetchViewJson(
       force ? "/api/portfolio-compare?refresh=1" : "/api/portfolio-compare",
       RISK_REQUEST_TIMEOUT_MS,
     );
+    if (!viewIsCurrent(generation)) return;
     if (!payload || payload.ok === false) throw new Error(payload?.error || "组合比较暂不可用");
     state.comparePayload = payload;
     state.compareReceivedAt = Date.now();
     state.compareError = "";
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.compareError = friendlyError(error, "组合比较暂不可用");
   } finally {
-    state.compareLoading = false;
-    renderCompare();
+    if (viewIsCurrent(generation)) {
+      state.compareLoading = false;
+      renderCompare();
+    }
   }
 }
 
@@ -2466,14 +2940,18 @@ async function sendPortfolioMutation(method, url, body) {
 function renderQuoteSections() {
   renderMarkets();
   renderBreadth();
-  renderGlobals();
   renderOvernight();
   renderSummary();
   renderPositions();
   renderConnectionState();
   renderSourceLabels();
   renderNotice();
+  // 弹层开着时同步刷新它的"股票信息"行，价格/涨跌幅跟着行情刷新走。
+  if (state.stockChartSymbol && els.stockChartPopover && !els.stockChartPopover.hidden) {
+    renderStockChartQuote(state.stockChartSymbol);
+  }
 }
+
 
 function renderMarkets() {
   const focusedChartSymbol = document.activeElement?.matches?.(".stock-chart-trigger")
@@ -2543,7 +3021,7 @@ function fetchIndexIntraday(symbol) {
   if (!pending) {
     pending = (async () => {
       try {
-        const payload = await fetchJson(`/api/stock-chart?symbol=${encodeURIComponent(symbol)}`);
+        const payload = await fetchJson(`/api/stock-chart?symbol=${encodeURIComponent(symbol)}`, STOCK_CHART_REQUEST_TIMEOUT_MS);
         if (payload?.ok === false) throw new Error(payload?.message || "fetch failed");
         const chart = normalizeStockChart(payload);
         const result = {
@@ -2654,10 +3132,11 @@ function scheduleLeadingEarlyRefresh() {
   }
 }
 
-// ---------------------------------------------------------------- 衍生品风险仪表盘
+// ---------------------------------------------------------------- 衍生品风险监控
 //
-// 这一块把「10-15 市场研判」里可量化的说法拆成因子，逐个标注口径是否科学，
-// 再用实盘数据自动核对。后端 derivatives_regime 负责取数与判定，前端只做呈现。
+// 后端 derivatives_regime 负责取数、观点回溯判定与量化信号阈值，前端只做呈现。
+// 观点核查区只展示「已验证 / 部分成立」；徽标语义是「当前读数是否触发阈值」，
+// 与原观点说对说错无关，两套状态分列显示。
 
 const DERIVATIVES_STATUS_CLASS = {
   confirmed: "is-ok",
@@ -2673,6 +3152,28 @@ const DERIVATIVES_VERDICT_CLASS = {
   principle: "",
   backtest: "is-pending",
 };
+
+const DERIVATIVES_MONITOR_CLASS = {
+  normal: "is-ok",
+  watch: "is-warning",
+  alert: "is-blocked",
+  unknown: "is-pending",
+};
+
+// 量化监控徽标：状态 + 当前读数，阈值规则放在 title 里，悬停即可核对口径。
+function derivativesMonitorBadge(monitor) {
+  const item = asObject(monitor);
+  if (!Object.keys(item).length) return null;
+  const status = String(item.status || "unknown");
+  const badge = span(
+    String(item.status_text || "暂无数据"),
+    `decision-badge monitor-badge ${DERIVATIVES_MONITOR_CLASS[status] || "is-pending"}`,
+  );
+  const valueText = String(item.value_text || "");
+  const thresholdText = String(item.threshold_text || "");
+  badge.title = [valueText, `阈值：${thresholdText}`].filter(Boolean).join("\n");
+  return badge;
+}
 
 function derivativesNum(value, suffix = "", digits = 2) {
   if (!isFiniteNumber(value)) return "--";
@@ -2712,6 +3213,8 @@ function renderDerivativesReadings(payload) {
   const readings = Array.isArray(payload.readings) ? payload.readings : [];
   const vix = asObject(payload.vix);
   const history = asObject(payload.history);
+  const monitoring = Array.isArray(payload.monitoring) ? payload.monitoring : [];
+  const monitorById = new Map(monitoring.map((entry) => [String(asObject(entry).id || ""), asObject(entry)]));
 
   for (const raw of readings) {
     const item = asObject(raw);
@@ -2725,6 +3228,10 @@ function renderDerivativesReadings(payload) {
       ));
     }
     card.append(head);
+
+    // A股 IV 百分位徽标：样本不足时后端给 unknown，只显示读数不评级。
+    const ivBadge = derivativesMonitorBadge(monitorById.get("cn_iv_percentile"));
+    if (ivBadge) card.append(ivBadge);
 
     const ivLine = div("derivative-card-main");
     ivLine.append(
@@ -2761,6 +3268,16 @@ function renderDerivativesReadings(payload) {
     pushRow("max pain", item.max_pain == null ? "--" : String(item.max_pain), "使期权卖方总亏损最小的到期价位。");
     card.append(rows);
 
+    // 期限结构与 25Δ RR 的阈值徽标，紧跟对应读数行之后，便于对照。
+    const signalRow = div("derivative-monitor-row");
+    for (const monitorId of ["term_structure", "rr_25d"]) {
+      const signal = monitorById.get(monitorId);
+      const badge = derivativesMonitorBadge(signal);
+      if (!badge) continue;
+      signalRow.append(span(String(signal.label || monitorId), "muted"), badge);
+    }
+    if (signalRow.childElementCount) card.append(signalRow);
+
     if (isFiniteNumber(history.iv_history_days) && history.iv_history_days > 0) {
       const foot = div("derivative-card-foot muted");
       foot.textContent = `A股 IV 历史百分位样本：${history.iv_history_days} 个交易日（逐日积累中）`;
@@ -2778,6 +3295,8 @@ function renderDerivativesReadings(payload) {
       head.append(span(formatPct(vix.change_pct), `market-price ${directionClass(vix.change_pct)}`));
     }
     card.append(head);
+    const vixBadge = derivativesMonitorBadge(monitorById.get("vix_percentile"));
+    if (vixBadge) card.append(vixBadge);
 
     const ivLine = div("derivative-card-main");
     ivLine.append(
@@ -2814,12 +3333,13 @@ function renderDerivativesChecks(payload) {
   if (!els.derivativesChecks) return;
   els.derivativesChecks.replaceChildren();
   const checks = Array.isArray(payload.checks) ? payload.checks : [];
+  const hiddenCount = Number(payload.checks_hidden_count) || 0;
   if (!checks.length) {
-    els.derivativesChecks.append(span("暂无核查结果", "muted"));
+    els.derivativesChecks.append(span("当前没有已验证或部分成立的观点", "muted"));
     if (els.derivativesCheckSummary) els.derivativesCheckSummary.textContent = "";
     return;
   }
-  const counts = { confirmed: 0, partial: 0, refuted: 0, pending: 0 };
+  const counts = { confirmed: 0, partial: 0 };
   for (const raw of checks) {
     const item = asObject(raw);
     const status = String(item.status || "pending");
@@ -2831,18 +3351,25 @@ function renderDerivativesChecks(payload) {
       span(String(item.title || "--"), "check-title"),
       span(String(item.factor || ""), "muted check-factor"),
     );
+    const badge = derivativesMonitorBadge(item.monitor);
+    if (badge) head.append(badge);
     row.append(head);
     const text = div("check-text");
     text.textContent = String(item.text || "");
     row.append(text);
+    // 阈值规则显式成行：不只看颜色，也能直接读到触发条件。
+    if (item.monitor && asObject(item.monitor).threshold_text) {
+      const rule = div("check-monitor-rule muted");
+      rule.textContent = `监控阈值：${asObject(item.monitor).threshold_text}`;
+      row.append(rule);
+    }
     els.derivativesChecks.append(row);
   }
   if (els.derivativesCheckSummary) {
     els.derivativesCheckSummary.replaceChildren(
       span(`已验证 ${counts.confirmed}`, "muted"),
       span(`部分成立 ${counts.partial}`, "muted"),
-      span(`不成立 ${counts.refuted}`, "muted"),
-      span(`待验证 ${counts.pending}`, "muted"),
+      span(`已隐藏 ${hiddenCount} 条不成立/待验证`, "muted"),
     );
   }
 }
@@ -2871,14 +3398,43 @@ function renderDerivativesRegime() {
 
   const confirmed = (Array.isArray(payload.checks) ? payload.checks : [])
     .filter((c) => asObject(c).status === "confirmed").length;
-  const refuted = (Array.isArray(payload.checks) ? payload.checks : [])
-    .filter((c) => asObject(c).status === "refuted").length;
+  const monitorSummary = asObject(payload.monitoring_summary);
+  const alertCount = Number(monitorSummary.alert) || 0;
+  const watchCount = Number(monitorSummary.watch) || 0;
   if (payload.ok === false) {
     els.derivativesState.textContent = "不可用";
     els.derivativesState.className = "decision-badge is-blocked";
   } else {
-    els.derivativesState.textContent = `已验证 ${confirmed} · 不成立 ${refuted}`;
-    els.derivativesState.className = "decision-badge is-ok";
+    // 头部徽标跟随量化信号，而不是观点回溯结论：有警示即为警示色。
+    els.derivativesState.textContent = alertCount
+      ? `${alertCount} 项警示 · ${watchCount} 项关注`
+      : watchCount
+        ? `${watchCount} 项关注`
+        : "全部正常";
+    els.derivativesState.className = `decision-badge ${alertCount ? "is-blocked" : watchCount ? "is-warning" : "is-ok"}`;
+  }
+  if (els.derivativesMonitorSummary) {
+    els.derivativesMonitorSummary.replaceChildren();
+    const headline = span(
+      String(monitorSummary.text || "--"),
+      `monitor-summary-headline ${alertCount ? "is-blocked" : watchCount ? "is-warning" : "is-ok"}`,
+    );
+    els.derivativesMonitorSummary.append(headline);
+    const items = Array.isArray(payload.monitoring) ? payload.monitoring : [];
+    for (const raw of items) {
+      const item = asObject(raw);
+      const chip = div("monitor-summary-chip");
+      const badge = derivativesMonitorBadge(item);
+      chip.append(span(String(item.label || item.id || "--"), "muted"));
+      if (badge) chip.append(badge);
+      const value = span(String(item.value_text || "--"), "monitor-summary-value");
+      value.title = String(item.threshold_text || "");
+      chip.append(value);
+      els.derivativesMonitorSummary.append(chip);
+    }
+    if (confirmed) {
+      els.derivativesMonitorSummary.append(span(`观点留档：已验证 ${confirmed} 条`, "muted"));
+    }
   }
 
   renderDerivativesFactorReview(payload.factor_review);
@@ -3297,46 +3853,221 @@ function renderBreadth() {
   }
 }
 
-function renderGlobals() {
-  const focusedChartSymbol = document.activeElement?.matches?.(".stock-chart-trigger")
-    ? normalizeChartSymbol(document.activeElement.dataset.symbol)
-    : "";
-  let replacementFocus = null;
-  els.globalGrid.replaceChildren();
-  if (!state.globals.length) {
-    els.globalGrid.append(span("暂无全球参考数据", "muted"));
+// 「隔夜全球标的」实际展示的标的：存储/半导体/芯片迁移标的始终展示；
+// 其余品种仍按 |同日相关| ≥ 阈值。全球参考复用同一批行情，展示过的证券会
+// 在下方从全球参考剔除，保证一个证券只占一个模块。
+function overnightMarketsVisible(rows, correlationTable = {}) {
+  return (Array.isArray(rows) ? rows : []).filter((market) => {
+    const symbol = normalizeChartSymbol(market.symbol);
+    if (market.featured === true || OVERNIGHT_FEATURED_SYMBOLS.has(symbol)) return true;
+    const correlation = correlationTable[symbol];
+    return Boolean(correlation && Math.abs(correlation.same) >= OVERNIGHT_CORRELATION_THRESHOLD);
+  });
+}
+
+function visibleOvernightMarkets() {
+  return overnightMarketsVisible(state.overnight, overnightCorrelationTable());
+}
+
+// 全球参考与隔夜列表的标的代码并不完全一致（如 usNVDA / b_NVDA），
+// 同时用代码和中文名做去重键。
+function overnightDisplayKey(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+// 「宽基ETF监控」：原「全球参考」英国/德法区块的位置改为四只核心宽基ETF
+// （沪深300/上证50/科创50/创业板）的实时行情 + 当日分时，重点关注成交量
+// 变化（量较昨日全天放量/缩量）。数据来自 /api/etf-broad-monitor（腾讯行情
+// + 5分钟K线分时，东财备援），后端 20s 缓存，前端按 ETF_BROAD_REFRESH_MS 轮询。
+const ETF_BROAD_CHART_W = 250;
+const ETF_BROAD_CHART_H = 96;
+
+async function refreshEtfBroad(force = false) {
+  if (state.etfBroadLoading) return;
+  state.etfBroadLoading = true;
+  try {
+    const payload = await fetchJson(
+      `/api/etf-broad-monitor${force ? "?refresh=1" : ""}`,
+      20_000,
+    );
+    if (payload && payload.ok !== false && Array.isArray(payload.items)) {
+      state.etfBroad = payload;
+      state.etfBroadError = "";
+      state.etfBroadReceivedAt = Date.now();
+    } else {
+      state.etfBroadError = (payload && payload.error) || "宽基ETF行情暂不可用";
+    }
+  } catch (error) {
+    state.etfBroadError = friendlyError(error, "宽基ETF行情暂不可用");
+  } finally {
+    state.etfBroadLoading = false;
+    renderEtfBroad();
+  }
+}
+
+function etfBroadVolumeRatioText(ratio) {
+  if (!isFiniteNumber(ratio) || ratio <= 0) return null;
+  const pct = Math.round((ratio - 1) * 100);
+  if (Math.abs(pct) < 1) return "量与昨日相当";
+  return pct > 0 ? `较昨日全天放量${pct}%` : `较昨日全天缩量${-pct}%`;
+}
+
+// 分时走势（价格线）+ 成交量柱（副图）。量比通过卡片上的放量/缩放量文字
+// 呈现，柱体按涨跌配色，最高量柱加粗强调，便于扫视量能异动。
+function renderEtfBroadChart(svg, intraday, quotePrevClose) {
+  svg.replaceChildren();
+  const items = (intraday && intraday.items) || [];
+  if (!items.length) {
+    svg.setAttribute("hidden", "");
+    return false;
+  }
+  const w = ETF_BROAD_CHART_W;
+  const h = ETF_BROAD_CHART_H;
+  const pad = 4;
+  const priceH = 62;
+  const volTop = priceH + 6;
+  const volH = h - volTop - pad;
+  const plotW = w - pad * 2;
+  const refClose = firstNumber(
+    pickNumber(intraday || {}, ["prev_close", "prevClose"]),
+    quotePrevClose,
+  );
+  const prices = [];
+  if (isFiniteNumber(refClose) && refClose > 0) prices.push(refClose);
+  for (const item of items) {
+    if (isFiniteNumber(item.close)) prices.push(item.close);
+  }
+  if (!prices.length) {
+    svg.setAttribute("hidden", "");
+    return false;
+  }
+  const lo = Math.min(...prices);
+  const hi = Math.max(...prices);
+  const range = hi - lo || Math.max(Math.abs(hi) * 0.001, 0.001);
+  const min = lo - range * 0.08;
+  const max = hi + range * 0.08;
+  const n = items.length;
+  const x = (i) => pad + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const y = (val) => pad + (max - val) / (max - min) * priceH;
+
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.removeAttribute("hidden");
+
+  if (isFiniteNumber(refClose) && refClose >= min && refClose <= max) {
+    svg.append(svgNode("line", {
+      x1: pad, x2: w - pad, y1: y(refClose), y2: y(refClose),
+      class: "stock-chart-reference", "stroke-dasharray": "3 3",
+    }));
+  }
+
+  const closes = items.map((item) => (isFiniteNumber(item.close) ? item.close : null));
+  let path = "";
+  closes.forEach((close, i) => {
+    if (close === null) return;
+    path += `${path ? "L" : "M"}${x(i).toFixed(2)},${y(close).toFixed(2)}`;
+  });
+  const lastIndex = closes.map((v) => v === null).lastIndexOf(false);
+  const latest = closes[lastIndex];
+  const direction = isFiniteNumber(refClose)
+    ? directionClass(latest - refClose)
+    : directionClass(latest - closes.find((v) => v !== null));
+  if (path) {
+    svg.append(svgNode("path", {
+      d: path,
+      class: `stock-intraday-line ${direction}`,
+      fill: "none",
+    }));
+  }
+  if (lastIndex >= 0) {
+    svg.append(svgNode("circle", {
+      cx: x(lastIndex), cy: y(latest), r: 2,
+      class: `stock-intraday-dot ${direction}`,
+    }));
+  }
+
+  const volumes = items.map((item) => (isFiniteNumber(item.volume) ? Math.max(item.volume, 0) : 0));
+  const maxVol = Math.max(...volumes, 1e-9);
+  const maxVolIndex = volumes.indexOf(Math.max(...volumes));
+  const barW = Math.max(1.5, Math.min(6, plotW / n * 0.62));
+  volumes.forEach((vol, i) => {
+    if (vol <= 0) return;
+    const bh = Math.max(1, (vol / maxVol) * volH);
+    const prev = i > 0 ? closes[i - 1] : null;
+    const cur = closes[i];
+    const barDirection = prev !== null && cur !== null ? directionClass(cur - prev) : direction;
+    svg.append(svgNode("rect", {
+      x: x(i) - barW / 2,
+      y: volTop + (volH - bh),
+      width: barW,
+      height: bh,
+      class: `etf-broad-vol-bar ${barDirection}${i === maxVolIndex ? " is-peak" : ""}`,
+    }));
+  });
+
+  const title = svgNode("title");
+  title.textContent = `分时 ${intraday.period || ""} · ${items.length} 个 bar · 数据源 ${intraday.source || "--"}`;
+  svg.append(title);
+  return true;
+}
+
+function renderEtfBroad() {
+  const grid = els.etfBroadGrid;
+  if (!grid) return;
+  const meta = els.etfBroadMeta;
+  grid.replaceChildren();
+  const payload = state.etfBroad;
+  if (state.etfBroadError && !payload) {
+    grid.append(span(state.etfBroadError, "muted"));
+    if (meta) meta.textContent = "";
     return;
   }
-  // 纽约原油/黄金（hf_CL/hf_GC）已并入隔夜全球标的的商品组，全球参考不再重复展示；
-  // 旧行情缓存仍会带出这两行，渲染时过滤。
-  for (const market of state.globals.filter((row) => row.symbol !== "hf_CL" && row.symbol !== "hf_GC").slice(0, 60)) {
-    const symbol = normalizeChartSymbol(market.symbol);
-    const chartable = symbol && GLOBAL_CHART_SYMBOLS.has(symbol);
-    const quoteTitle = market.quoteTime ? `报价 ${formatDateTime(market.quoteTime)}${market.isStale ? " · 延迟" : ""}` : "";
-    const value = span(`${formatPrice(market.price)}  ${formatPct(market.changePct)}`, directionClass(market.changePct));
-    // 全球参考中的海外指数/个股均已配置图表数据源（美股/港股走腾讯，韩股走 Naver，欧股/台湾走东财，ES/NQ 期货走新浪）；
-    // 无分时源的品种弹层里分时面板显示空态。
-    const item = chartable ? document.createElement("button") : div("global-item");
-    if (chartable) {
-      item.type = "button";
-      item.className = "global-item stock-chart-trigger";
-      item.dataset.symbol = symbol;
-      item.setAttribute("aria-controls", "stock-chart-popover");
-      item.setAttribute("aria-haspopup", "dialog");
-      item.setAttribute("aria-expanded", state.stockChartSymbol === symbol && !els.stockChartPopover.hidden ? "true" : "false");
-      item.setAttribute("aria-label", `查看${market.name || symbol}的日K线和当日分时图`);
-      item.title = `查看${market.name || symbol}K线与分时图${quoteTitle ? ` · ${quoteTitle}` : ""}`;
-      if (focusedChartSymbol === symbol) replacementFocus = item;
-      if (state.stockChartSymbol === symbol && !els.stockChartPopover.hidden) {
-        state.stockChartAnchor = item;
-      }
-    } else if (quoteTitle) {
-      item.title = quoteTitle;
-    }
-    item.append(span(market.name || market.symbol || "--"), value);
-    els.globalGrid.append(item);
+  if (!payload || !Array.isArray(payload.items) || !payload.items.length) {
+    grid.append(span("暂无宽基ETF数据", "muted"));
+    if (meta) meta.textContent = "";
+    return;
   }
-  if (replacementFocus) replacementFocus.focus({ preventScroll: true });
+  for (const item of payload.items) {
+    const card = div("etf-broad-item");
+    const head = div("etf-broad-head");
+    const changePct = firstNumber(pickNumber(item || {}, ["change_pct", "changePct"]));
+    const price = firstNumber(pickNumber(item || {}, ["price"]));
+    head.append(
+      span(item.name || item.symbol || "--", "etf-broad-name"),
+      span(`${formatPrice(price)}  ${formatPct(changePct)}`, `etf-broad-price ${directionClass(changePct)}`),
+    );
+    card.append(head);
+
+    const svg = svgNode("svg", { class: "etf-broad-chart" });
+    svg.setAttribute("hidden", "");
+    card.append(svg);
+
+    const stats = div("etf-broad-stats");
+    const amountYi = firstNumber(pickNumber(item || {}, ["amount_yi", "amountYi"]));
+    if (isFiniteNumber(amountYi)) {
+      stats.append(span(`成交额 ${formatYi(amountYi)}`, "etf-broad-stat"));
+    }
+    const ratioText = etfBroadVolumeRatioText(firstNumber(pickNumber(item || {}, ["volume_ratio", "volumeRatio"])));
+    if (ratioText) {
+      const ratio = firstNumber(pickNumber(item || {}, ["volume_ratio", "volumeRatio"]));
+      stats.append(span(ratioText, `etf-broad-stat etf-broad-volume ${ratio >= 1 ? "is-up" : "is-down"}`));
+    }
+    if (item.error) {
+      stats.append(span(item.error, "etf-broad-stat muted"));
+    }
+    card.append(stats);
+    const quoteTime = String(item.quote_time || "");
+    card.title = `${item.thscode || item.symbol || ""}${quoteTime ? ` · 报价 ${quoteTime}` : ""}`;
+    grid.append(card);
+    renderEtfBroadChart(svg, item.intraday, firstNumber(pickNumber(item || {}, ["prev_close", "prevClose"])));
+  }
+  if (meta) {
+    const asOf = String(payload.as_of || "");
+    const date = parseDate(asOf);
+    const timeText = date
+      ? date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+      : "";
+    meta.textContent = `更新 ${timeText || "--"}${state.etfBroadError ? ` · ${state.etfBroadError}` : ""}`;
+  }
 }
 
 function renderOvernight() {
@@ -3344,52 +4075,87 @@ function renderOvernight() {
     ? normalizeChartSymbol(document.activeElement.dataset.symbol)
     : "";
   let replacementFocus = null;
+
+  // 存储/半导体/芯片迁移标的始终展示；其余隔夜品种仍只保留与持仓相关度
+  // 高（|同日相关|≥0.15）的标的。相关度优先用服务端重算快照，取不到才回落
+  // 内置快照。
+  const correlationTable = overnightCorrelationTable();
+  const visibleOvernight = overnightMarketsVisible(state.overnight, correlationTable);
+
+  // 隔夜行情 5 分钟才变一次，而行情轮询盘中 5 秒一次：不看内容就重绘的话，
+  // 触发器节点会被反复换掉，正在悬浮的弹层也就跟着被拆掉。这里用内容指纹
+  // 判重——内容没变就不重绘。
+  const signature = [
+    state.overnightCorrelationAsOf,
+    ...visibleOvernight.map((market) => {
+      const symbol = normalizeChartSymbol(market.symbol);
+      const correlation = correlationTable[symbol];
+      return [
+        symbol,
+        market.name,
+        market.price,
+        market.changePct,
+        market.quoteTime,
+        market.featured ? "featured" : "",
+        isAiCoreOvernightMarket(market) ? "ai-core" : "",
+        correlation ? `${correlation.same}/${correlation.next}` : "",
+      ].join("|");
+    }),
+  ].join(";");
+  if (signature === state.overnightGridSignature && els.overnightGrid.childElementCount) {
+    return;
+  }
+  state.overnightGridSignature = signature;
+
   els.overnightGrid.replaceChildren();
   if (!state.overnight.length) {
     els.overnightGrid.append(span("暂无隔夜全球标的数据", "muted"));
     return;
   }
-
-  // 只保留与持仓相关度高（|同日相关|≥0.15）的隔夜标的；
-  // 相关度快照见 OVERNIGHT_PORTFOLIO_CORRELATION，其余隔夜品种不再展示，
-  // 以聚焦对持仓有解释力/对冲意义的标的。
-  const correlatedOvernight = state.overnight.filter((market) => {
-    const symbol = normalizeChartSymbol(market.symbol);
-    const correlation = OVERNIGHT_PORTFOLIO_CORRELATION[symbol];
-    return correlation && Math.abs(correlation.same) >= 0.15;
-  });
-  if (!correlatedOvernight.length) {
-    els.overnightGrid.append(span("暂无与持仓高相关的隔夜标的数据", "muted"));
+  if (!visibleOvernight.length) {
+    els.overnightGrid.append(span("暂无与持仓高相关或半导体主题的隔夜标的数据", "muted"));
     return;
   }
 
-  // 所有保留的标的横向排成一行，节约纵向高度。
-  const grid = div("global-grid overnight-grid overnight-grid-row");
-  for (const market of correlatedOvernight) {
-    const symbol = normalizeChartSymbol(market.symbol);
-    const chartable = symbol && GLOBAL_CHART_SYMBOLS.has(symbol);
-    const quoteTitle = market.quoteTime ? `报价 ${formatDateTime(market.quoteTime)}` : "";
-    const correlation = OVERNIGHT_PORTFOLIO_CORRELATION[symbol];
-    const highlighted = correlation && Math.abs(correlation.same) >= 0.15;
-    const correlationTitle = correlation
-      ? ` · 与持仓相关度 同日${correlation.same >= 0 ? "+" : ""}${correlation.same.toFixed(2)}/隔夜${correlation.next >= 0 ? "+" : ""}${correlation.next.toFixed(2)}${correlation.same < 0 ? "（负相关，对冲项）" : ""}`
-      : "";
-    const item = chartable ? document.createElement("button") : div("global-item overnight-item");
-    if (chartable) {
-      item.type = "button";
-      item.className = "global-item overnight-item stock-chart-trigger";
-      item.dataset.symbol = symbol;
-      item.setAttribute("aria-controls", "stock-chart-popover");
-      item.setAttribute("aria-haspopup", "dialog");
-      item.setAttribute("aria-expanded", state.stockChartSymbol === symbol && !els.stockChartPopover.hidden ? "true" : "false");
-      item.setAttribute("aria-label", `查看${market.name || symbol}的日K线和当日分时图`);
-      item.title = `${market.name || symbol}${correlationTitle} · 查看K线与分时图${quoteTitle ? ` · ${quoteTitle}` : ""}`;
-      if (highlighted) item.classList.add("is-correlated");
-      if (focusedChartSymbol === symbol) replacementFocus = item;
-      if (state.stockChartSymbol === symbol && !els.stockChartPopover.hidden) {
-        state.stockChartAnchor = item;
-      }
-    } else if (quoteTitle) {
+  // 与全球参考共用同样的国家/时区分块顺序；每个区块内保持原始行情顺序。
+  for (const timezoneGroup of groupMarketsByTimezone(visibleOvernight)) {
+    const block = div("overnight-group");
+    block.append(span(marketTimezoneLabel(timezoneGroup), "overnight-group-label"));
+    const grid = div("global-grid overnight-grid");
+    for (const market of timezoneGroup.rows) {
+      const symbol = normalizeChartSymbol(market.symbol);
+      const chartable = symbol && GLOBAL_CHART_SYMBOLS.has(symbol);
+      const quoteTitle = market.quoteTime
+        ? `报价 ${formatDateTime(market.quoteTime)}${market.isStale ? " · 延迟" : ""}`
+        : "";
+      const correlation = correlationTable[symbol];
+      const correlated = Boolean(correlation && Math.abs(correlation.same) >= OVERNIGHT_CORRELATION_THRESHOLD);
+      // AI/存储核心与「高相关」共用同一套高亮；两种原因在悬停提示里分别说明，
+      // 免得把「属于 AI 链」误读成「与我的持仓高度相关」。
+      const aiCore = isAiCoreOvernightMarket(market);
+      const highlighted = correlated || aiCore;
+      const snapshotAsOf = state.overnightCorrelationAsOf;
+      const correlationTitle = correlated
+        ? ` · ${overnightCorrelationText(correlation)}${snapshotAsOf ? `（快照 ${snapshotAsOf}）` : ""}`
+        : aiCore
+          ? " · AI/存储核心标的（相关度未达阈值或暂无样本）"
+          : "";
+      const item = chartable ? document.createElement("button") : div("global-item overnight-item");
+      if (chartable) {
+        item.type = "button";
+        item.className = "global-item overnight-item stock-chart-trigger";
+        item.dataset.symbol = symbol;
+        item.setAttribute("aria-controls", "stock-chart-popover");
+        item.setAttribute("aria-haspopup", "dialog");
+        item.setAttribute("aria-expanded", state.stockChartSymbol === symbol && !els.stockChartPopover.hidden ? "true" : "false");
+        item.setAttribute("aria-label", `查看${market.name || symbol}的日K线和当日分时图`);
+        item.title = `${market.name || symbol}${correlationTitle} · 查看K线与分时图${quoteTitle ? ` · ${quoteTitle}` : ""}`;
+        if (highlighted) item.classList.add("is-correlated");
+        if (focusedChartSymbol === symbol) replacementFocus = item;
+        if (state.stockChartSymbol === symbol && !els.stockChartPopover.hidden) {
+          state.stockChartAnchor = item;
+        }
+      } else if (quoteTitle) {
         item.title = quoteTitle;
       }
       const nameLine = div("overnight-name");
@@ -3398,8 +4164,10 @@ function renderOvernight() {
       valueLine.append(span(formatPrice(market.price)), span(formatPct(market.changePct), directionClass(market.changePct)));
       item.append(nameLine, valueLine);
       grid.append(item);
+    }
+    block.append(grid);
+    els.overnightGrid.append(block);
   }
-  els.overnightGrid.append(grid);
   if (replacementFocus) replacementFocus.focus({ preventScroll: true });
 }
 
@@ -3533,6 +4301,210 @@ function accountSnapshotDisplay() {
       ? `账户快照 ${date} · 未核验，非实时持仓`
       : `账户快照 ${date} · 时效待核验，非券商实时持仓`;
   return { asOf, current, date, label };
+}
+
+function normalizeBreakeven(payload) {
+  // 服务端契约：ok/data_quality/summary/scenarios 必须存在且结构正确才渲染；
+  // 任何缺字段都降级为 ok:false，绝不用残缺数据算出一个看似正常的回本数字。
+  const source = asObject(payload);
+  if (source.ok !== true) {
+    return { ok: false, error: source.error || "breakeven_unavailable" };
+  }
+  const summary = asObject(source.summary);
+  const dataQuality = asObject(source.data_quality);
+  const positions = Array.isArray(source.positions) ? source.positions : [];
+  const scenarios = Array.isArray(source.scenarios) ? source.scenarios : [];
+  if (!isFiniteNumber(summary.economic_cost_cny) || !isFiniteNumber(summary.nav_cny)) {
+    return { ok: false, error: "breakeven_incomplete_summary" };
+  }
+  return {
+    ok: true,
+    error: "",
+    generated_at: source.generated_at || "",
+    summary,
+    data_quality: {
+      price_basis: dataQuality.price_basis || "unknown",
+      live_quote_count: firstNumber(dataQuality.live_quote_count),
+      position_count: firstNumber(dataQuality.position_count),
+    },
+    positions: positions.filter((item) => item && typeof item === "object"),
+    scenarios: scenarios
+      .filter((item) => item && Array.isArray(item.horizons))
+      .map((item) => ({
+        drift_mode: item.drift_mode || "",
+        label: item.label || "",
+        annualized_drift_pct: firstNumber(item.annualized_drift_pct),
+        horizons: item.horizons.filter((h) => h && typeof h === "object"),
+      })),
+    reference_timeline: (Array.isArray(source.reference_timeline) ? source.reference_timeline : [])
+      .filter((item) => item && typeof item === "object"),
+    warnings: (Array.isArray(source.warnings) ? source.warnings : []).filter((w) => typeof w === "string"),
+    limitations: (Array.isArray(source.limitations) ? source.limitations : []).filter((w) => typeof w === "string"),
+  };
+}
+
+function renderBreakeven() {
+  const payload = normalizeBreakeven(state.breakeven);
+  if (!payload.ok) {
+    els.breakevenMeta.textContent = "尚无法测算";
+    els.breakevenSummary.replaceChildren();
+    els.breakevenScenarios.replaceChildren();
+    els.breakevenTimeline.replaceChildren();
+    els.breakevenPositions.replaceChildren();
+    const reason = payload.error === "no_positive_economic_cost"
+      ? "全部持仓的券商成本均为非正数，没有经济回本目标。"
+      : payload.error === "risk_snapshot_has_no_positions"
+        ? "风险快照暂无持仓明细。"
+        : "回本测算不可用。";
+    els.breakevenAlert.hidden = false;
+    els.breakevenAlert.textContent = reason;
+    return;
+  }
+
+  const summary = asObject(payload.summary);
+  const quality = asObject(payload.data_quality);
+  const basisLabel = quality.price_basis === "live" ? "实时价格"
+    : quality.price_basis === "mixed" ? `混合口径 ${quality.live_quote_count}/${quality.position_count}`
+      : "账户快照价";
+
+  els.breakevenMeta.textContent = [
+    `价格基准 ${basisLabel}`,
+    summary.correlation_source === "empirical" || summary.correlation_source === "empirical_repairs"
+      ? `相关性实测 ${summary.correlated_assets} 只` : "相关性为假设值",
+    payload.generated_at ? formatMarketQuoteTimestamp(payload.generated_at) : "",
+  ].filter(Boolean).join(" · ");
+
+  els.breakevenSummary.replaceChildren(
+    summaryItem("回本目标（经济成本）", formatAmount(summary.economic_cost_cny), ""),
+    summaryItem("当前净权益", formatAmount(summary.nav_cny), ""),
+    summaryItem("需上涨", formatPct(summary.required_gain_pct), "up"),
+    summaryItem("组合年化波动", isFiniteNumber(summary.portfolio_volatility_pct) ? `${summary.portfolio_volatility_pct.toFixed(1)}%` : "--", ""),
+  );
+
+  // 价格基准不是实时价时，必须在最显眼处警告：否则用户会把历史口径当成现值。
+  // 引擎已经在 warnings 里写过同类提示，这里只补充「前端视角」的一句，避免
+  // 同一件事被重复三遍挤占版面。
+  const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+  const messages = quality.price_basis && quality.price_basis !== "live"
+    ? [`价格基准为${quality.price_basis === "mixed" ? "混合口径" : "账户快照价"}，非实时行情。`, ...warnings]
+    : warnings;
+  els.breakevenAlert.hidden = messages.length === 0;
+  els.breakevenAlert.textContent = messages.join(" ");
+
+  els.breakevenScenarios.replaceChildren(...renderBreakevenScenarios(payload.scenarios));
+  els.breakevenTimeline.replaceChildren(...renderBreakevenTimeline(payload.reference_timeline));
+  els.breakevenPositions.replaceChildren(...renderBreakevenPositions(payload.positions));
+}
+
+function renderBreakevenScenarios(scenarios) {
+  const list = Array.isArray(scenarios) ? scenarios : [];
+  if (!list.length) return [];
+  return list.map((scenario) => {
+    const block = document.createElement("div");
+    block.className = "breakeven-scenario";
+    const heading = document.createElement("div");
+    heading.className = "breakeven-scenario-heading";
+    heading.textContent = `${scenario.label}（年化漂移 ${formatPct(scenario.annualized_drift_pct)}）`;
+    block.append(heading);
+
+    const row = document.createElement("div");
+    row.className = "breakeven-horizons";
+    for (const horizon of scenario.horizons || []) {
+      const cell = document.createElement("div");
+      cell.className = "breakeven-horizon";
+      const years = isFiniteNumber(horizon.horizon_years) ? `${horizon.horizon_years}年` : "--";
+      const probability = firstNumber(horizon.probability_pct);
+      const value = document.createElement("strong");
+      value.textContent = isFiniteNumber(probability) ? `${probability.toFixed(1)}%` : "--";
+      // 概率高低用色阶表达「现实难度」，不改任何门禁状态。
+      value.className = !isFiniteNumber(probability) ? "flat"
+        : probability >= 50 ? "up" : probability >= 20 ? "flat" : "down";
+      const label = document.createElement("span");
+      label.textContent = `${years}内回本概率`;
+      const detail = document.createElement("em");
+      detail.textContent = isFiniteNumber(horizon.required_annual_return_pct)
+        ? `需年化 ${formatPct(horizon.required_annual_return_pct)}` : "";
+      cell.append(value, label, detail);
+      row.append(cell);
+    }
+    block.append(row);
+
+    if (scenario.horizons && scenario.horizons.length) {
+      const last = scenario.horizons[scenario.horizons.length - 1];
+      const note = document.createElement("p");
+      note.className = "breakeven-scenario-note";
+      note.textContent = `${last.horizon_years}年期末盈亏中位数 ${formatPct(last.median_terminal_gain_pct)}（10%–90% 分位 ${formatPct(last.p10_terminal_gain_pct)} ~ ${formatPct(last.p90_terminal_gain_pct)}）`;
+      block.append(note);
+    }
+    return block;
+  });
+}
+
+function renderBreakevenTimeline(timeline) {
+  const list = Array.isArray(timeline) ? timeline : [];
+  if (!list.length) return [];
+  const wrapper = document.createElement("div");
+  wrapper.className = "breakeven-timeline-wrap";
+  const caption = document.createElement("span");
+  caption.className = "muted";
+  caption.textContent = "按不同年化收益，达到回本目标所需年限（不含路径风险）：";
+  const row = document.createElement("div");
+  row.className = "breakeven-timeline-row";
+  for (const item of list) {
+    const chip = document.createElement("span");
+    chip.className = "breakeven-timeline-chip";
+    const years = firstNumber(item.years_to_target);
+    chip.textContent = `${formatPct(item.annual_return_pct)} → ${isFiniteNumber(years) ? `${years.toFixed(1)} 年` : "不可达"}`;
+    row.append(chip);
+  }
+  wrapper.append(caption, row);
+  return [wrapper];
+}
+
+function renderBreakevenPositions(positions) {
+  const list = Array.isArray(positions) ? positions : [];
+  if (!list.length) return [];
+  const wrapper = document.createElement("div");
+  wrapper.className = "breakeven-positions-wrap";
+  const caption = document.createElement("span");
+  caption.className = "muted";
+  caption.textContent = "逐股回本所需涨幅（由大到小）：";
+  const table = document.createElement("table");
+  table.className = "breakeven-table";
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["名称", "成本", "现价", "需涨", "浮动盈亏", "说明"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.append(th);
+  }
+  thead.append(headRow);
+  const tbody = document.createElement("tbody");
+  for (const item of list) {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = item.name || item.thscode || "--";
+    const cost = document.createElement("td");
+    cost.textContent = isFiniteNumber(item.broker_cost) ? formatPrice(item.broker_cost) : "--";
+    const price = document.createElement("td");
+    price.textContent = isFiniteNumber(item.price) ? formatPrice(item.price) : "--";
+    const need = document.createElement("td");
+    need.textContent = formatPct(item.required_gain_pct);
+    need.className = directionClass(item.required_gain_pct);
+    const pnl = document.createElement("td");
+    pnl.textContent = formatAmount(item.unrealized_pnl_cny, true);
+    pnl.className = directionClass(item.unrealized_pnl_cny);
+    const note = document.createElement("td");
+    note.className = "muted";
+    note.textContent = item.excluded_from_target
+      ? (item.excluded_from_target === "non_positive_broker_cost" ? "成本为负，不计入目标" : "缺少成本")
+      : (item.quote_status === "live" ? "实时" : "快照价");
+    tr.append(name, cost, price, need, pnl, note);
+    tbody.append(tr);
+  }
+  table.append(thead, tbody);
+  wrapper.append(caption, table);
+  return [wrapper];
 }
 
 function renderSummary() {
@@ -3740,35 +4712,41 @@ function renderAggTSignal() {
 
 async function refreshPaperT() {
   if (compareActive() || state.paperT.loading) return;
+  const generation = state.viewGeneration;
   state.paperT.loading = true;
   try {
-    const payload = await fetchJson(portfolioQuery("/api/paper-t"), AUTO_PAPER_REQUEST_TIMEOUT_MS);
+    const payload = await fetchViewJson(portfolioQuery("/api/paper-t"), AUTO_PAPER_REQUEST_TIMEOUT_MS);
+    if (!viewIsCurrent(generation)) return;
     if (!payload || typeof payload !== "object") throw new Error("自动模拟盘接口返回为空");
     state.paperT.today = payload;
     state.paperT.error = payload.ok === false ? String(payload.error || "自动模拟盘暂不可用") : "";
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.paperT.error = friendlyError(error, "自动模拟盘暂不可用");
   } finally {
-    state.paperT.loading = false;
+    if (viewIsCurrent(generation)) state.paperT.loading = false;
   }
-  renderPaperT();
+  if (viewIsCurrent(generation)) renderPaperT();
 }
 
 async function refreshPaperTHistory() {
   if (state.paperT.historyLoading) return;
+  const generation = state.viewGeneration;
   state.paperT.historyLoading = true;
   try {
-    const payload = await fetchJson(portfolioQuery("/api/paper-t/history"), AUTO_PAPER_REQUEST_TIMEOUT_MS);
+    const payload = await fetchViewJson(portfolioQuery("/api/paper-t/history"), AUTO_PAPER_REQUEST_TIMEOUT_MS);
+    if (!viewIsCurrent(generation)) return;
     if (!payload || typeof payload !== "object") throw new Error("策略对比接口返回为空");
     if (payload.ok === false) throw new Error(payload.error || "策略对比暂不可用");
     state.paperT.history = payload;
     state.paperT.historyError = "";
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.paperT.historyError = friendlyError(error, "策略对比暂不可用");
   } finally {
-    state.paperT.historyLoading = false;
+    if (viewIsCurrent(generation)) state.paperT.historyLoading = false;
   }
-  renderPaperTHistory();
+  if (viewIsCurrent(generation)) renderPaperTHistory();
 }
 
 async function voidPaperT(strategyId, strategyName) {
@@ -4493,8 +5471,10 @@ function weekdayLabelCN(value) {
 
 async function refreshIntradayHistoryDates() {
   if (compareActive()) return;
+  const generation = state.viewGeneration;
   try {
-    const payload = await fetchJson(portfolioQuery("/api/intraday-pnl/dates"), REQUEST_TIMEOUT_MS);
+    const payload = await fetchViewJson(portfolioQuery("/api/intraday-pnl/dates"), REQUEST_TIMEOUT_MS);
+    if (!viewIsCurrent(generation)) return;
     if (!payload || payload.ok === false) throw new Error(payload?.error || "历史台账日期暂不可用");
     state.intradayHistory.dates = Array.isArray(payload.dates)
       ? payload.dates.filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value)))
@@ -4502,11 +5482,14 @@ async function refreshIntradayHistoryDates() {
     state.intradayHistory.retentionDays = firstNumber(pickNumber(payload, ["retention_days"]), 0);
     state.intradayHistory.datesError = "";
   } catch (error) {
+    if (!viewIsCurrent(generation)) return;
     state.intradayHistory.datesError = friendlyError(error, "历史台账日期暂不可用");
   } finally {
-    state.intradayHistory.datesLoaded = true;
-    syncIntradayHistoryEndOptions();
-    void refreshIntradayHistory();
+    if (viewIsCurrent(generation)) {
+      state.intradayHistory.datesLoaded = true;
+      syncIntradayHistoryEndOptions();
+      void refreshIntradayHistory();
+    }
   }
 }
 
@@ -4523,12 +5506,14 @@ function intradayHistoryEntryFor(date) {
 
 async function refreshIntradayHistory() {
   if (compareActive()) return;
+  const generation = state.viewGeneration;
   // 防重复：已有一轮拉取在进行时只登记待复查，结束后自动补一轮。
   if (state.intradayHistory.loading) {
     state.intradayHistory.pendingRecheck = true;
     return;
   }
   await restoreIntradayHistoryCache();
+  if (!viewIsCurrent(generation)) return;
   const dates = intradayHistoryDateRange();
   const pending = dates.filter((date) => {
     if (date === intradayHistoryToday()) return false;
@@ -4545,11 +5530,11 @@ async function refreshIntradayHistory() {
   renderIntradayHistory();
   await Promise.allSettled(pending.map(async (date) => {
     try {
-      const payload = await fetchJson(
+      const payload = await fetchViewJson(
         portfolioQuery(`/api/intraday-pnl/history?date=${encodeURIComponent(date)}`),
         INTRADAY_HISTORY_REQUEST_TIMEOUT_MS,
       );
-      if (token !== state.intradayHistory.token) return;
+      if (token !== state.intradayHistory.token || !viewIsCurrent(generation)) return;
       if (!payload || payload.ok === false) {
         throw new Error(String(payload?.error || payload?.message || "该日盘中轨迹不可用"));
       }
@@ -4561,11 +5546,11 @@ async function refreshIntradayHistory() {
     } catch (error) {
       // 失败不进缓存：只在本轮记为"不可用"，下次刷新自动重试
       //（服务重启后冷缓存的首轮请求可能超时，不应永久 poisoning）。
-      if (token !== state.intradayHistory.token) return;
+      if (token !== state.intradayHistory.token || !viewIsCurrent(generation)) return;
       state.intradayHistory.dayErrors[date] = friendlyError(error, "该日盘中轨迹不可用");
     }
   }));
-  if (token !== state.intradayHistory.token) return;
+  if (token !== state.intradayHistory.token || !viewIsCurrent(generation)) return;
   state.intradayHistory.loading = false;
   syncIntradayPnlSelector();
   renderIntradayHistory();
@@ -4806,6 +5791,34 @@ function intradayHistoryEmptyMessage(segments) {
   return "所选范围内暂无可展示的盘中盈亏点位";
 }
 
+function buildIntradayHistoryCumulativeSegments(segments) {
+  let carried = 0;
+  let completeChain = true;
+  let missingDays = 0;
+  let unknownSegments = 0;
+  const cumulativeSegments = (Array.isArray(segments) ? segments : []).map((segment) => {
+    const complete = segment.status === "ok" && segment.series.length > 0;
+    const cumulativeKnown = completeChain && complete;
+    const series = segment.series.map((point) => ({
+      ...point,
+      pnl: cumulativeKnown ? carried + point.pnl : null,
+    }));
+    if (cumulativeKnown) carried += segment.series[segment.series.length - 1].pnl;
+    if (!complete) {
+      completeChain = false;
+      missingDays += 1;
+    }
+    if (!cumulativeKnown) unknownSegments += 1;
+    return { ...segment, series, cumulativeKnown };
+  });
+  return {
+    segments: cumulativeSegments,
+    finalCumulative: completeChain && cumulativeSegments.length ? carried : null,
+    missingDays,
+    unknownSegments,
+  };
+}
+
 function drawIntradayHistoryChart(segments) {
   const svg = els.intradayHistoryChart;
   const width = 960;
@@ -4823,14 +5836,10 @@ function drawIntradayHistoryChart(segments) {
   const totalMs = Math.max(1, segments.length * dayMs);
   const x = (value) => padding.left + value / totalMs * plotWidth;
 
-  // 期间累计链：carried = 此前各交易日收盘盈亏之和；当日累计 = carried + 当日点位。
-  let carried = 0;
-  const cumulativeSegments = segments.map((segment) => {
-    const series = segment.series.map((point) => ({ ...point, pnl: carried + point.pnl }));
-    if (segment.series.length) carried += segment.series[segment.series.length - 1].pnl;
-    return { ...segment, series };
-  });
-  const finalCumulative = carried;
+  // 期间累计只在完整已知日链上计算；任何一个缺失/不完整日之后都保持未知，绝不按 0 续接。
+  const cumulative = buildIntradayHistoryCumulativeSegments(segments);
+  const cumulativeSegments = cumulative.segments;
+  const finalCumulative = cumulative.finalCumulative;
 
   const scaleOf = (values) => {
     let valueMin = Math.min(0, ...values);
@@ -4847,7 +5856,7 @@ function drawIntradayHistoryChart(segments) {
     return { valueMin, valueMax };
   };
   const dailyScale = scaleOf(segments.flatMap((segment) => segment.series.map((point) => point.pnl)));
-  const cumScale = scaleOf(cumulativeSegments.flatMap((segment) => segment.series.map((point) => point.pnl)));
+  const cumScale = scaleOf(cumulativeSegments.flatMap((segment) => segment.series.map((point) => point.pnl)).filter(isFiniteNumber));
   const yDaily = (value) => dailyPane.top + (dailyScale.valueMax - value) / (dailyScale.valueMax - dailyScale.valueMin) * dailyPane.height;
   const yCum = (value) => cumPane.top + (cumScale.valueMax - value) / (cumScale.valueMax - cumScale.valueMin) * cumPane.height;
 
@@ -4920,6 +5929,20 @@ function drawIntradayHistoryChart(segments) {
         y2: pane.bottom,
         class: "pnl-session-join",
       }));
+    }
+
+    if (!cumulativeSegments[segmentIndex].cumulativeKnown) {
+      const unknownLabel = svgNode("text", {
+        x: midX,
+        y: cumPane.top + cumPane.height / 2,
+        class: "pnl-history-status-label",
+        "text-anchor": "middle",
+      });
+      unknownLabel.textContent = "累计未知";
+      const unknownTitle = svgNode("title");
+      unknownTitle.textContent = "缺失或不完整交易日导致期间累计未知；不按零补齐，也不与后续日期连线";
+      unknownLabel.append(unknownTitle);
+      svg.append(unknownLabel);
     }
 
     if (segment.status !== "ok") {
@@ -5008,22 +6031,24 @@ function drawIntradayHistoryChart(segments) {
       }
     }
 
-    // 下栏：期间累计线（同一来源拆分，保持视觉一致）。
-    for (const run of splitHistoryRunsBySource(cumProjected)) {
-      const backfillRun = run.source === "backfill";
-      if (run.points.length === 1) {
-        svg.append(svgNode("circle", {
-          cx: x(run.points[0].plotTimeValue),
-          cy: yCum(run.points[0].pnl),
-          r: 1.8,
-          class: `pnl-cum-dot${backfillRun ? " is-backfill" : ""}`,
+    // 下栏：仅绘制完整已知链；缺口当日及之后显示“累计未知”，不连线。
+    if (cumulativeSegments[segmentIndex].cumulativeKnown) {
+      for (const run of splitHistoryRunsBySource(cumProjected)) {
+        const backfillRun = run.source === "backfill";
+        if (run.points.length === 1) {
+          svg.append(svgNode("circle", {
+            cx: x(run.points[0].plotTimeValue),
+            cy: yCum(run.points[0].pnl),
+            r: 1.8,
+            class: `pnl-cum-dot${backfillRun ? " is-backfill" : ""}`,
+          }));
+          continue;
+        }
+        svg.append(svgNode("path", {
+          d: run.points.map((point, index) => `${index ? "L" : "M"}${x(point.plotTimeValue).toFixed(2)},${yCum(point.pnl).toFixed(2)}`).join(" "),
+          class: `pnl-cum-line${backfillRun ? " is-backfill" : ""}`,
         }));
-        continue;
       }
-      svg.append(svgNode("path", {
-        d: run.points.map((point, index) => `${index ? "L" : "M"}${x(point.plotTimeValue).toFixed(2)},${yCum(point.pnl).toFixed(2)}`).join(" "),
-        class: `pnl-cum-line${backfillRun ? " is-backfill" : ""}`,
-      }));
     }
 
     const closePoint = projected[projected.length - 1];
@@ -5046,6 +6071,7 @@ function drawIntradayHistoryChart(segments) {
 
       // 累计栏每日收盘点：即"昨日收盘 → 今日开盘"的衔接锚点。
       const cumClosePoint = cumProjected[cumProjected.length - 1];
+      if (cumClosePoint && isFiniteNumber(cumClosePoint.pnl)) {
       const cumCloseDot = svgNode("circle", { cx: x(cumClosePoint.plotTimeValue), cy: yCum(cumClosePoint.pnl), r: 2.2, class: `pnl-cum-close-dot ${directionClass(cumClosePoint.pnl)}` });
       const cumCloseTitle = svgNode("title");
       cumCloseTitle.textContent = `${segment.date} 期间累计 ${formatAmount(cumClosePoint.pnl, true)}`;
@@ -5061,19 +6087,21 @@ function drawIntradayHistoryChart(segments) {
         cumCloseLabel.textContent = formatChartAmount(cumClosePoint.pnl);
         svg.append(cumCloseLabel);
       }
+      }
 
       for (let index = 0; index < projected.length; index += 1) {
         const point = projected[index];
+        const cumulativePnl = isFiniteNumber(cumProjected[index].pnl) ? cumProjected[index].pnl : null;
         modelPoints.push({
           date: segment.date,
           time: point.time,
           pnl: point.pnl,
-          cum: cumProjected[index].pnl,
+          cum: cumulativePnl,
           source: point.source || "recorded",
           pnlRecorded: isFiniteNumber(point.pnl_recorded) ? point.pnl_recorded : null,
           x: x(point.plotTimeValue),
           y: yDaily(point.pnl),
-          yCum: yCum(cumProjected[index].pnl),
+          yCum: isFiniteNumber(cumulativePnl) ? yCum(cumulativePnl) : null,
         });
       }
     }
@@ -5094,7 +6122,9 @@ function drawIntradayHistoryChart(segments) {
     class: `pnl-pane-label ${directionClass(finalCumulative)}`,
     "text-anchor": "start",
   });
-  cumPaneLabel.textContent = `期间累计 ${formatAmount(finalCumulative, true)}`;
+  cumPaneLabel.textContent = isFiniteNumber(finalCumulative)
+    ? `期间累计 ${formatAmount(finalCumulative, true)}`
+    : "期间累计 --（含缺失/不完整日）";
   svg.append(cumPaneLabel);
 
   // 时间刻度只标注第一段：所有段共享同一固定交易轴；段数多、首段过窄时
@@ -5260,9 +6290,13 @@ function showIntradayHistoryTooltip(index) {
   model.hoverDot.setAttribute("cy", point.y);
   model.hoverDot.removeAttribute("visibility");
   if (model.hoverDotCum) {
-    model.hoverDotCum.setAttribute("cx", point.x);
-    model.hoverDotCum.setAttribute("cy", point.yCum ?? point.y);
-    model.hoverDotCum.removeAttribute("visibility");
+    if (isFiniteNumber(point.cum) && isFiniteNumber(point.yCum)) {
+      model.hoverDotCum.setAttribute("cx", point.x);
+      model.hoverDotCum.setAttribute("cy", point.yCum);
+      model.hoverDotCum.removeAttribute("visibility");
+    } else {
+      model.hoverDotCum.setAttribute("visibility", "hidden");
+    }
   }
 
   els.intradayHistoryTooltipDate.textContent =
@@ -5276,9 +6310,11 @@ function showIntradayHistoryTooltip(index) {
     `${sourcePrefix}当日 ${formatAmount(point.pnl, true)}${originalSuffix}`;
   els.intradayHistoryTooltipValue.className = `intraday-pnl-tooltip-value ${directionClass(point.pnl)}`;
   if (els.intradayHistoryTooltipCumulative) {
-    els.intradayHistoryTooltipCumulative.textContent = `累计 ${formatAmount(point.cum ?? point.pnl, true)}`;
+    els.intradayHistoryTooltipCumulative.textContent = isFiniteNumber(point.cum)
+      ? `累计 ${formatAmount(point.cum, true)}`
+      : "累计 --（缺失/不完整交易日）";
     els.intradayHistoryTooltipCumulative.className =
-      `intraday-history-tooltip-cumulative ${directionClass(point.cum ?? point.pnl)}`;
+      `intraday-history-tooltip-cumulative ${directionClass(point.cum)}`;
   }
   els.intradayHistoryTooltip.hidden = false;
 
@@ -5312,7 +6348,7 @@ function renderDailyPnlHistory() {
   );
   const latestCumulative = snapshot?.periodTotalDeclared
     ? (periodTotalIncomplete ? null : snapshot.periodTotalPnl)
-    : firstNumber(latestRecord?.cumulativePnl);
+    : dailyPnlCumulativeValue(latestRecord);
 
   els.dailyPnlHistoryTotal.textContent = periodTotalIncomplete
     ? "累计不完整 --"
@@ -5343,13 +6379,13 @@ function renderDailyPnlHistory() {
   }
   if (snapshot?.warnings?.length) notes.push(...snapshot.warnings.slice(0, 2));
   if (state.dailyPnlHistoryError) notes.push(`历史更新失败：${state.dailyPnlHistoryError}`);
-  notes.push("缺失金额不按零处理；部分覆盖日期不绘制日盈亏柱");
+  notes.push("缺失金额不按零处理；部分覆盖日期不绘制日盈亏柱，累计值标记未知并断开连线");
   els.dailyPnlHistoryNote.textContent = notes.join(" · ");
 
   renderDailyPnlHistoryTable(records);
   hideDailyPnlHistoryTooltip();
   state.dailyPnlHistoryChartModel = null;
-  const hasChartData = records.some((record) => dailyPnlRecordAmount(record) != null || isFiniteNumber(record.cumulativePnl));
+  const hasChartData = records.some((record) => dailyPnlRecordAmount(record) != null || isFiniteNumber(dailyPnlCumulativeValue(record)));
   if (!hasChartData) {
     els.dailyPnlHistoryChart.setAttribute("hidden", "");
     els.dailyPnlHistoryEmpty.hidden = false;
@@ -5376,6 +6412,7 @@ function renderDailyPnlHistoryTable(records) {
   for (const record of [...records].reverse()) {
     const row = document.createElement("tr");
     const dailyPnl = dailyPnlRecordAmount(record);
+    const cumulativePnl = dailyPnlCumulativeValue(record);
     const dailyPnlCell = td("", `numeric sensitive ${directionClass(dailyPnl)}`);
     dailyPnlCell.append(span(formatAmount(dailyPnl, true), "daily-pnl-history-amount-main"));
     if (!isFiniteNumber(dailyPnl) && isFiniteNumber(record.coveredDailyPnl)) {
@@ -5395,7 +6432,7 @@ function renderDailyPnlHistoryTable(records) {
     row.append(
       td(record.date, ""),
       dailyPnlCell,
-      td(formatAmount(record.cumulativePnl, true), `numeric sensitive ${directionClass(record.cumulativePnl)}`),
+      td(formatAmount(cumulativePnl, true), `numeric sensitive ${directionClass(cumulativePnl)}`),
       coverageCell,
       statusCell,
     );
@@ -5406,6 +6443,17 @@ function renderDailyPnlHistoryTable(records) {
 function dailyPnlRecordAmount(record) {
   if (!record || String(record.status || "").toLowerCase() === "partial") return null;
   return isFiniteNumber(record.dailyPnl) ? record.dailyPnl : null;
+}
+
+function dailyPnlCumulativeValue(record) {
+  if (!record || !isFiniteNumber(record.cumulativePnl)) return null;
+  const status = String(record.status || "").trim().toLowerCase();
+  const incompleteCoverage = (isFiniteNumber(record.coveragePct) && record.coveragePct < 100)
+    || (isFiniteNumber(record.coveredPositions) && isFiniteNumber(record.eligiblePositions)
+      && record.coveredPositions < record.eligiblePositions)
+    || (isFiniteNumber(record.missingPositions) && record.missingPositions > 0);
+  if (status === "partial" || incompleteCoverage) return null;
+  return record.cumulativePnl;
 }
 
 function dailyPnlStatusClass(value) {
@@ -5463,7 +6511,7 @@ function drawDailyPnlHistoryChart(records) {
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
   const dailyValues = records.map(dailyPnlRecordAmount).filter(isFiniteNumber);
-  const cumulativeValues = records.map((record) => record.cumulativePnl).filter(isFiniteNumber);
+  const cumulativeValues = records.map(dailyPnlCumulativeValue).filter(isFiniteNumber);
   const dailyDomain = paddedChartDomain(dailyValues, true);
   const cumulativeDomain = paddedChartDomain(cumulativeValues, false);
   const slotWidth = plotWidth / Math.max(1, records.length);
@@ -5586,12 +6634,13 @@ function drawDailyPnlHistoryChart(records) {
   svg.append(hoverLine);
   const points = records.map((record, index) => {
     const dailyPnl = dailyPnlRecordAmount(record);
+    const cumulativePnl = dailyPnlCumulativeValue(record);
     const focusY = isFiniteNumber(dailyPnl)
       ? yDaily(dailyPnl)
-      : isFiniteNumber(record.cumulativePnl)
-        ? yCumulative(record.cumulativePnl)
+      : isFiniteNumber(cumulativePnl)
+        ? yCumulative(cumulativePnl)
         : null;
-    return { ...record, dailyPnl, x: x(index), y: focusY };
+    return { ...record, dailyPnl, cumulativePnl, x: x(index), y: focusY };
   }).filter((point) => isFiniteNumber(point.y));
   state.dailyPnlHistoryChartModel = {
     width,
@@ -5628,8 +6677,9 @@ function dailyPnlCumulativeSegments(records) {
   const segments = [];
   let current = [];
   records.forEach((record, index) => {
-    if (isFiniteNumber(record.cumulativePnl)) {
-      current.push({ index, value: record.cumulativePnl });
+    const cumulativePnl = dailyPnlCumulativeValue(record);
+    if (isFiniteNumber(cumulativePnl)) {
+      current.push({ index, value: cumulativePnl });
       return;
     }
     if (current.length) segments.push(current);
@@ -6317,7 +7367,6 @@ function setDecisionBadge(element, text, className) {
 const POSITION_INTRADAY_TTL_MS = 150_000;
 const POSITION_INTRADAY_SPARK_W = 80;
 const POSITION_INTRADAY_SPARK_H = 28;
-const POSITION_INTRADAY_STAGGER_MS = 8_000;
 
 function renderPositionIntradaySparkline(svg, items, prevClose) {
   svg.replaceChildren();
@@ -6399,44 +7448,53 @@ function renderPositionIntradaySparkline(svg, items, prevClose) {
 
 async function fetchPositionIntraday(symbol) {
   const cached = state.positionIntradayCache.get(symbol);
-  if (cached && Date.now() - cached.receivedAt <= POSITION_INTRADAY_TTL_MS) {
-    return cached;
-  }
-  let pending = state.positionIntradayPending.get(symbol);
-  if (!pending) {
-    pending = fetchJson(`/api/stock-chart?symbol=${encodeURIComponent(symbol)}`);
-    state.positionIntradayPending.set(symbol, pending);
-  }
-  try {
-    const payload = await pending;
-    if (payload?.ok === false) throw new Error(payload.message || "fetch failed");
-    const chart = normalizeStockChart(payload);
-    const result = {
-      receivedAt: Date.now(),
-      items: chart.intraday.items,
-      prevClose: chart.intraday.prevClose,
-    };
-    state.positionIntradayCache.set(symbol, result);
-    return result;
-  } catch {
-    return null;
-  } finally {
-    if (state.positionIntradayPending.get(symbol) === pending) {
-      state.positionIntradayPending.delete(symbol);
+  if (cached && Date.now() - cached.receivedAt <= POSITION_INTRADAY_TTL_MS) return cached;
+  const existing = state.positionIntradayPending.get(symbol);
+  if (existing) return existing;
+  const round = state.quoteRound;
+  // 同一轮报价中，排序、金额隐藏、计划到达等整表重绘都不得再次触发失败请求。
+  if (state.positionIntradayAttempts.get(symbol) === round) return null;
+  state.positionIntradayAttempts.set(symbol, round);
+  const pending = (async () => {
+    try {
+      const payload = await fetchJson(`/api/stock-chart?symbol=${encodeURIComponent(symbol)}`, STOCK_CHART_REQUEST_TIMEOUT_MS);
+      if (payload?.ok === false) throw new Error(payload.message || "分时暂不可用");
+      const chart = normalizeStockChart(payload);
+      const result = {
+        receivedAt: Date.now(),
+        items: chart.intraday.items,
+        prevClose: chart.intraday.prevClose,
+      };
+      state.positionIntradayCache.set(symbol, result);
+      state.positionIntradayErrors.delete(symbol);
+      return result;
+    } catch (error) {
+      state.positionIntradayErrors.set(symbol, friendlyError(error, "分时暂不可用"));
+      return null;
+    } finally {
+      if (state.positionIntradayPending.get(symbol) === pending) {
+        state.positionIntradayPending.delete(symbol);
+      }
     }
-  }
+  })();
+  state.positionIntradayPending.set(symbol, pending);
+  return pending;
 }
 
 function paintPositionIntradayCell(cell, data) {
   const svg = cell.querySelector("svg.position-intraday-spark");
   const placeholder = cell.querySelector(".position-intraday-placeholder");
   if (!svg || !placeholder) return;
-  const ok = renderPositionIntradaySparkline(svg, data.items, data.prevClose);
+  const error = state.positionIntradayErrors.get(cell.dataset.symbol) || "";
+  const ok = Boolean(data) && renderPositionIntradaySparkline(svg, data.items, data.prevClose);
+  if (!data) svg.setAttribute("hidden", "");
   placeholder.hidden = ok;
-  if (!ok) placeholder.textContent = "—";
+  placeholder.className = `position-intraday-placeholder${error ? " is-error" : " muted"}`;
+  placeholder.textContent = error ? "失败" : "—";
+  placeholder.title = error ? `分时图加载失败：${error}；下一轮报价最多重试一次` : "";
 }
 
-function renderPositionIntradayCell(symbol, rowIndex = 0) {
+function renderPositionIntradayCell(symbol) {
   const cell = document.createElement("td");
   cell.className = "position-intraday-cell";
   cell.dataset.symbol = symbol;
@@ -6448,29 +7506,305 @@ function renderPositionIntradayCell(symbol, rowIndex = 0) {
   const cached = state.positionIntradayCache.get(symbol);
   if (cached && Date.now() - cached.receivedAt <= POSITION_INTRADAY_TTL_MS) {
     paintPositionIntradayCell(cell, cached);
-  } else {
-    // 只要还有分时未显示的标的，renderPositions 会一次性并发预取这些标的；
-    // 这里若有 pending 请求则直接复用（不延迟），让分时尽快显示。全部可见
-    // 后的周期性刷新才走逐行错峰（renderPositions 不再发起并发预取）。
-    const pending = state.positionIntradayPending.get(symbol);
-    const delay = pending ? 0 : rowIndex * POSITION_INTRADAY_STAGGER_MS;
-    setTimeout(() => {
-      if (!cell.isConnected) return;
-      void (async () => {
-        const data = await fetchPositionIntraday(symbol);
-        if (!data) {
-          if (cell.isConnected) placeholder.textContent = "—";
-          return;
-        }
-        // 持仓表每次行情刷新都会整表重建，发起请求的单元格可能已被替换；
-        // 因此数据到达后绘制当前 DOM 中该股的全部分时单元格。
-        document
-          .querySelectorAll(`#positions-body .position-intraday-cell[data-symbol="${symbol}"]`)
-          .forEach((mounted) => paintPositionIntradayCell(mounted, data));
-      })();
-    }, delay);
+  } else if (state.positionIntradayErrors.has(symbol)) {
+    paintPositionIntradayCell(cell, null);
   }
   return cell;
+}
+
+// ---------------------------------------------------------------- 重要新闻列
+//
+// 把「重要新闻」面板的内容搬进持仓表：每行只显示该股新闻的**日期**，
+// 颜色表示消息好坏（好=红、中性=黑、坏=绿，与 A 股涨跌配色一致），
+// 点击日期在指针旁浮出当天全部标题。
+//
+// 极性判定复用后端同一套词库（news_sentiment.POSITIVE_TERMS / NEGATIVE_TERMS
+// 的语义子集），在前端做是因为新闻载荷已带标题、逐条回后端求分会把 5 秒
+// 轮询变成额外请求。词库不一致的风险由「中性」兜底——判定不出就涂黑，
+// 不猜方向。
+
+const NEWS_SENTIMENT_TERMS = Object.freeze({
+  good: ["利好", "中标", "超预期", "增持", "回购", "获批", "预增", "签约", "涨价", "订单", "增长", "盈利", "扩产", "分红", "派息", "上涨", "突破", "合作", "回暖", "创新高"],
+  bad: ["利空", "立案", "预亏", "违约", "退市", "处罚", "减持", "商誉减值", "亏损", "调查", "质押", "诉讼", "下滑", "终止", "失败", "问询", "解禁", "警告", "裁员", "风险提示", "下跌", "降价", "搁置"],
+});
+const NEWS_NEGATORS = ["不", "未", "无", "非", "没有"];
+
+function newsSentimentOf(item) {
+  // 后端若直接给出极性字段就优先用它；没有才用词库判定。
+  const supplied = pickNumber(item, ["sentiment", "polarity", "score"]);
+  let score = isFiniteNumber(supplied) ? supplied : 0;
+  if (!isFiniteNumber(supplied)) {
+    const text = `${item.title || ""} ${item.summary || ""}`;
+    for (const [direction, terms] of Object.entries(NEWS_SENTIMENT_TERMS)) {
+      let total = 0;
+      for (const term of terms) {
+        let start = 0;
+        while (true) {
+          const at = text.indexOf(term, start);
+          if (at < 0) break;
+          start = at + term.length;
+          const prefix = text.slice(Math.max(0, at - 2), at);
+          const negated = NEWS_NEGATORS.some((word) => prefix.includes(word));
+          total += (direction === "good" ? 1 : -1) * (negated ? -1 : 1);
+        }
+      }
+      score += total;
+    }
+  }
+  if (score > 0) return { key: "good", label: "好消息" };
+  if (score < 0) return { key: "bad", label: "坏消息" };
+  return { key: "neutral", label: "中性" };
+}
+
+function newsForPosition(item) {
+  const code = securitiesCode(item?.code) || securitiesCode(item?.symbol);
+  if (!code) return [];
+  const symbol = String(item?.symbol || "");
+  return (Array.isArray(state.news) ? state.news : []).filter((news) => {
+    const symbols = Array.isArray(news.symbols) ? news.symbols : [];
+    return symbols.some((value) => securitiesCode(value) === code || String(value) === symbol);
+  });
+}
+
+function newsDayKey(value) {
+  const text = String(value || "");
+  const matched = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+  if (matched) return `${matched[1]}-${matched[2]}-${matched[3]}`;
+  const timestamp = timestampValue(text);
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function groupNewsByDay(items) {
+  // 同一天可能有多条：合并成一个日期按钮，按当天最坏消息定色（坏消息优先醒目）。
+  const buckets = new Map();
+  for (const item of items) {
+    const day = newsDayKey(item.publishedAt);
+    if (!day) continue;
+    if (!buckets.has(day)) buckets.set(day, { day, items: [] });
+    buckets.get(day).items.push(item);
+  }
+  const groups = Array.from(buckets.values());
+  for (const group of groups) {
+    group.items.sort((a, b) => timestampValue(b.publishedAt) - timestampValue(a.publishedAt));
+    const sentiments = group.items.map(newsSentimentOf);
+    const worst = sentiments.some((s) => s.key === "bad")
+      ? "bad"
+      : sentiments.every((s) => s.key === "good") ? "good" : "neutral";
+    group.sentiment = { key: worst, label: worst === "bad" ? "坏消息" : worst === "good" ? "好消息" : "中性" };
+  }
+  groups.sort((a, b) => b.day.localeCompare(a.day));
+  return groups;
+}
+
+function closeNewsTooltip() {
+  if (els.newsTooltip) els.newsTooltip.hidden = true;
+  state.newsTooltipAnchor = null;
+}
+
+function findNewsGroupForChip(chip) {
+  // 从当前 DOM 的持仓状态重算该行当天分组：不把 news 对象挂到 DOM 上，
+  // 避免序列化/循环引用，也保证新闻刷新后点开的是最新内容。
+  const symbol = String(chip?.dataset?.symbol || "");
+  const day = String(chip?.dataset?.newsDay || "");
+  const position = (state.positions || []).find((item) => String(item.symbol) === symbol);
+  if (!position || !day) return null;
+  return groupNewsByDay(newsForPosition(position)).find((group) => group.day === day) || null;
+}
+
+function showNewsTooltip(anchor, group) {
+  if (!els.newsTooltip) return;
+  els.newsTooltip.replaceChildren();
+  els.newsTooltip.append(span(`${group.day} · ${group.sentiment.label}`, "news-tooltip-head"));
+  for (const news of group.items) {
+    const row = div("news-tooltip-item");
+    const title = safeLink(news.url, news.title || "无标题新闻", "news-tooltip-title");
+    const meta = div("news-tooltip-meta muted");
+    const parts = [];
+    if (news.source) parts.push(news.source);
+    if (news.publishedAt) parts.push(formatDateTime(news.publishedAt));
+    meta.textContent = parts.join(" · ");
+    row.append(title, meta);
+    els.newsTooltip.append(row);
+  }
+  els.newsTooltip.hidden = false;
+  els.newsTooltip.classList.toggle("is-good", group.sentiment.key === "good");
+  els.newsTooltip.classList.toggle("is-bad", group.sentiment.key === "bad");
+  // 定位在按钮下方；越界时向左/向上收。
+  const rect = anchor.getBoundingClientRect?.() || { left: 0, bottom: 0 };
+  const width = els.newsTooltip.offsetWidth || 320;
+  const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - width - 8));
+  els.newsTooltip.style.left = `${left}px`;
+  els.newsTooltip.style.top = `${rect.bottom + 6}px`;
+  state.newsTooltipAnchor = anchor;
+}
+
+function renderPositionNews(item) {
+  const cell = td("", "news-cell");
+  // 不设日期上限：独立「重要新闻」面板已移除，这一列是唯一入口，截断会丢信息。
+  // 日期按天倒序，全部列出；行高随新闻天数增长，这是刻意的取舍。
+  const groups = groupNewsByDay(newsForPosition(item));
+  if (!groups.length) {
+    const empty = span("暂无", "muted");
+    empty.title = "该股票当前没有重要新闻或其新闻源暂不可用。";
+    cell.append(empty);
+    return cell;
+  }
+  for (const group of groups) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `news-date-chip is-${group.sentiment.key}`;
+    chip.dataset.newsDay = group.day;
+    chip.dataset.symbol = item.symbol;
+    chip.textContent = group.day.slice(5);
+    chip.title = `${group.day} · ${group.sentiment.label}\n${group.items.map((news) => `· ${news.title}`).join("\n")}`;
+    chip.setAttribute("aria-label", `${item.name} ${group.day} 的 ${group.items.length} 条新闻，点击查看`);
+    cell.append(chip);
+  }
+  return cell;
+}
+
+// ---------------------------------------------------------------- 持仓最新财报
+//
+// 累计口径（三季报 = 1-9 月合计），不拆单季。未披露的股票显示「三季报未披露」，
+// 不拿中报顶替、不补零；ETF 显示占位。数值一律带来源报告期，避免把中报当三季报看。
+
+const FUNDAMENTALS_REFRESH_MS = 6 * 60 * 60 * 1000;
+const FUNDAMENTALS_RETRY_MS = 10 * 60 * 1000;
+
+function formatYiAmount(value) {
+  // 人民币金额统一折成「亿」，负值保留符号。
+  if (!isFiniteNumber(value)) return "--";
+  const yi = value / 1e8;
+  const digits = Math.abs(yi) >= 100 ? 0 : 1;
+  return `${yi.toFixed(digits)}亿`;
+}
+
+function formatSignedPct(value, digits = 1) {
+  if (!isFiniteNumber(value)) return "--";
+  return `${value > 0 ? "+" : ""}${value.toFixed(digits)}%`;
+}
+
+function securitiesCode(value) {
+  // 后端 entries 以 6 位数字代码为键；持仓 symbol 可能是 sh600519 / 600519.SH。
+  // 只取「前导非数字之后的 6 位数字」，不能只剥前缀——'600519.SH' 剥前缀仍是原串。
+  const text = String(value || "").trim();
+  const match = /(\d{6})/.exec(text);
+  return match ? match[1] : "";
+}
+
+function fundamentalsEntryFor(item) {
+  const entries = asObject(asObject(state.fundamentals).entries);
+  const code = securitiesCode(item?.code) || securitiesCode(item?.thscode) || securitiesCode(item?.symbol);
+  return asObject(entries[code]);
+}
+
+function renderPositionFundamental(item) {
+  const cell = td("", "fundamental-cell");
+  const entry = fundamentalsEntryFor(item);
+  const loading = state.fundamentals == null;
+
+  if (loading) {
+    cell.append(span("加载中…", "muted"));
+    return cell;
+  }
+  if (entry.instrument_type === "etf") {
+    cell.append(span("ETF 无财报", "muted"));
+    return cell;
+  }
+
+  const orgHolding = asObject(entry.org_holding);
+  const orgText = isFiniteNumber(orgHolding.org_count) ? `机构 ${orgHolding.org_count}家` : "";
+
+  if (entry.available !== true) {
+    const missing = span("三季报未披露", "fundamental-period is-pending");
+    missing.title = "该股尚未披露三季报（披露期截至 10-31）；不拿中报顶替，也不补零。";
+    cell.append(missing);
+    if (orgText) {
+      const orgLine = span(orgText, "muted fundamental-org");
+      orgLine.title = `机构数报告期 ${orgHolding.report_period || "--"}，披露期内会随基金季报更新。`;
+      cell.append(orgLine);
+    }
+    if (entry.reason && entry.reason !== "not_disclosed") {
+      cell.append(span(String(entry.reason), "muted"));
+    }
+    return cell;
+  }
+
+  const periodValue = String(entry.period || "");
+  const isQ3 = periodValue === "2026-09-30";
+  const period = span(String(entry.period_label || periodValue || "--"), "fundamental-period");
+  period.title = `报告期 ${entry.period || "--"}${entry.notice_date ? ` · 公告日 ${entry.notice_date}` : ""}`;
+  if (!isQ3) {
+    // 最新一期仍是中报：三季报还没披露。必须写明，否则「2026中报」的营收
+    // 会被当成三季报读——这是本项目最反对的那类"成功但含义错误"。
+    period.classList.add("is-pending");
+    period.textContent = `最新 ${entry.period_label || periodValue}`;
+    period.title += "\n三季报尚未披露（披露期截至 10-31），以下为中报累计口径。";
+  }
+  // 机构数并进报告期一行，省一行高度；它本来就是"披露期内会变"的附加信息，
+  // 和报告期放在一起语义也一致。
+  if (orgText) {
+    period.append(span(` · ${orgText}`, "fundamental-org-inline"));
+    period.title += `\n机构数报告期 ${orgHolding.report_period || "--"}，披露期内会随基金季报更新。`;
+  }
+  cell.append(period);
+
+  const revenueLine = div("fundamental-line");
+  revenueLine.append(
+    span("营收 ", "muted"),
+    span(formatYiAmount(entry.revenue)),
+    span(` ${formatSignedPct(entry.revenue_yoy_pct)}`, directionClass(entry.revenue_yoy_pct)),
+  );
+  cell.append(revenueLine);
+
+  const profitLine = div("fundamental-line");
+  const loss = isFiniteNumber(entry.net_profit) && entry.net_profit < 0;
+  profitLine.append(
+    span("归母 ", "muted"),
+    span(loss ? `亏 ${formatYiAmount(Math.abs(entry.net_profit))}` : formatYiAmount(entry.net_profit),
+      loss ? "is-negative-pe" : ""),
+    span(` ${formatSignedPct(entry.net_profit_yoy_pct)}`, directionClass(entry.net_profit_yoy_pct)),
+  );
+  cell.append(profitLine);
+
+  // 毛利/ROE/EPS 合成一行：三者都是小数百分比，用「毛利 8.7% · ROE 12.7% · EPS 2.30」
+  // 在 170px 内会折成两行，折行比省掉标签更占高度，所以这三项去掉重复单位后的
+  // 间距也压紧（见 .fundamental-metrics）。
+  const marginLine = div("fundamental-line muted fundamental-metrics");
+  marginLine.append(
+    span(`毛利 ${isFiniteNumber(entry.gross_margin_pct) ? `${entry.gross_margin_pct.toFixed(1)}%` : "--"}`),
+    span(`ROE ${isFiniteNumber(entry.roe_pct) ? `${entry.roe_pct.toFixed(1)}%` : "--"}`),
+    span(`EPS ${isFiniteNumber(entry.eps) ? entry.eps.toFixed(2) : "--"}`),
+  );
+  cell.append(marginLine);
+  return cell;
+}
+
+async function refreshFundamentals(force = false) {
+  if (state.fundamentalsLoading) return;
+  state.fundamentalsLoading = true;
+  state.fundamentalsRequestedAt = Date.now();
+  try {
+    const suffix = force ? "?refresh=1" : "";
+    const payload = await fetchJson(`/api/holding-fundamentals${suffix}`, 30_000);
+    if (payload?.ok === false) throw new Error(payload?.error || "fetch failed");
+    state.fundamentals = payload;
+    renderPositions();
+  } catch {
+    // 失败保留上一份数据；首次失败由渲染层显示「加载中…」，不伪造「未披露」。
+  } finally {
+    state.fundamentalsLoading = false;
+  }
+}
+
+function startFundamentalsScheduler() {
+  if (state.fundamentalsStarted) return;
+  state.fundamentalsStarted = true;
+  void refreshFundamentals();
+  window.setInterval(() => void refreshFundamentals(), FUNDAMENTALS_REFRESH_MS);
 }
 
 function renderPositions() {
@@ -6483,19 +7817,30 @@ function renderPositions() {
   const schoolMap = new Map(
     ((state.schoolSignalPayload && state.schoolSignalPayload.stocks) || [])
       .filter((stock) => stock && stock.symbol)
-      .map((stock) => [String(stock.symbol), stock]),
+      // 两侧都按 normalizeSymbol 归一：持仓 symbol 与流派载荷可能分别是
+      // sh688545 / 688545.SH，直接比会静默配不上、整列显示「—」。
+      .map((stock) => [normalizeSymbol(stock.symbol), stock]),
   );
   const totalMarketValue = sum(unsortedPositions.filter((item) => isFiniteNumber(item.marketValue)).map((item) => item.marketValue));
+  // 列头也标一次判断时刻：没有流派信号的行显示「—」，仅靠行内小字会让人以为整列没算。
+  if (els.schoolHeaderTime) {
+    const headerJudgedAt = pick(asObject(state.schoolSignalPayload), ["generated_at", "generatedAt"]);
+    const judgedLabel = formatSchoolJudgedAt(headerJudgedAt);
+    els.schoolHeaderTime.textContent = judgedLabel ? `判断 ${judgedLabel}` : "";
+    els.schoolHeaderTime.title = headerJudgedAt
+      ? `流派信号计算时刻：${formatDateTime(headerJudgedAt) || headerJudgedAt}\n信号以收盘价确认，盘中为预估。`
+      : "";
+  }
   const positions = stableSortPositions(unsortedPositions, state.positionSortKey, state.positionSortDirection, totalMarketValue);
   updatePositionSortIndicators();
   els.positionsBody.replaceChildren();
   els.positionsCount.textContent = positions.length ? String(positions.length) : "--";
-  els.positionsAccountState.textContent = `${account.label} · 信号由本地规则引擎计算 · 点击行筛选新闻`;
+  els.positionsAccountState.textContent = `${account.label} · 信号由本地规则引擎计算`;
 
   if (!positions.length) {
     const row = document.createElement("tr");
     const cell = td(state.quoteError ? "持仓行情暂时不可用" : "正在获取持仓行情…", "empty");
-    cell.colSpan = 15;
+    cell.colSpan = 17;
     row.append(cell);
     els.positionsBody.append(row);
     renderTPlanSection();
@@ -6503,10 +7848,8 @@ function renderPositions() {
     return;
   }
 
-  // 分时优先：只要还有任何持仓的分时未显示（缓存缺失或过期），就一次性并发
-  // 预取这些标的，数据到达即绘制对应单元格；全部可见后，才走单元格内的逐行
-  // 错峰机制进行周期性刷新。fetchPositionIntraday 自带 pending 去重，单元格
-  // 渲染时发起的 setTimeout 请求会复用这里已经发起的同一个 Promise。
+  // 每轮报价对缺失/过期分时最多尝试一次；结果直接回填当前单元格。
+  // 不再在失败后递归 renderPositions，避免“失败 → 整表重绘 → 再失败”的无限重试。
   const now = Date.now();
   const missingIntradaySymbols = positions
     .map((item) => item.symbol)
@@ -6514,20 +7857,12 @@ function renderPositions() {
       const cached = state.positionIntradayCache.get(symbol);
       return !cached || now - cached.receivedAt > POSITION_INTRADAY_TTL_MS;
     });
-  if (missingIntradaySymbols.length) {
-    void (async () => {
-      await Promise.allSettled(
-        missingIntradaySymbols.map((symbol) =>
-          fetchPositionIntraday(symbol).then((data) => {
-            if (!data) return;
-            document
-              .querySelectorAll(`#positions-body .position-intraday-cell[data-symbol="${symbol}"]`)
-              .forEach((mounted) => paintPositionIntradayCell(mounted, data));
-          }),
-        ),
-      );
-      renderPositions();
-    })();
+  for (const symbol of missingIntradaySymbols) {
+    void fetchPositionIntraday(symbol).then((data) => {
+      document
+        .querySelectorAll(`#positions-body .position-intraday-cell[data-symbol="${symbol}"]`)
+        .forEach((mounted) => paintPositionIntradayCell(mounted, data));
+    });
   }
 
   for (let positionIndex = 0; positionIndex < positions.length; positionIndex++) {
@@ -6538,9 +7873,8 @@ function renderPositions() {
           ? signals.reduce((worst, signal) => SIGNAL_LEVEL_ORDER[signal.level] < SIGNAL_LEVEL_ORDER[worst] ? signal.level : worst, signals[0].level)
           : "";
         const row = document.createElement("tr");
-        row.className = `position-row${isFiniteNumber(item.price) ? "" : " is-missing"}${item.isStale ? " is-stale" : ""}${state.selectedSymbol === item.symbol ? " is-selected" : ""}${worstLevel ? ` signal-${worstLevel}` : ""}`;
+        row.className = `position-row${isFiniteNumber(item.price) ? "" : " is-missing"}${item.isStale ? " is-stale" : ""}${worstLevel ? ` signal-${worstLevel}` : ""}`;
         row.dataset.symbol = item.symbol;
-        row.title = `点击行筛选${item.name}新闻`;
 
         const stock = document.createElement("td");
         stock.className = "stock-cell";
@@ -6606,9 +7940,15 @@ function renderPositions() {
         const marketValueCell = td(formatAmount(item.marketValue), "numeric sensitive");
         if (account.current !== true) marketValueCell.title = `按 ${account.date} 快照数量与页面行情估算`;
         // 做T参考不再占用持仓表列位，改为页面底部「做T 决策中心」统一呈现。
-        // 流派信号列：整合自「三大流派信号 · 重仓股」卡片，紧凑芯片 + 悬停明细
+        // 流派信号列：紧凑芯片 + 悬停明细 + 判断时间。
+        // 判断时间取后端计算时刻（盘中每次刷新都会变），悬停给出所依据的日K日期，
+        // 两者分开显示——「什么时候判的」和「用的哪根K线」不是一回事。
         const schoolCell = td("", "position-schools");
-        const schoolStock = schoolMap.get(String(item.symbol));
+        const schoolStock = schoolMap.get(normalizeSymbol(item.symbol));
+        const schoolPayload = asObject(state.schoolSignalPayload);
+        const schoolJudgedAt = pick(schoolPayload, ["generated_at", "generatedAt"])
+          || pick(asObject(schoolStock), ["generated_at", "generatedAt"]);
+        const schoolBarDate = pick(asObject(schoolStock), ["date", "bar_date", "barDate", "as_of", "asOf"]);
         if (schoolStock) {
           for (const key of SCHOOL_ORDER) {
             const s = (schoolStock.schools || {})[key];
@@ -6617,7 +7957,7 @@ function renderPositions() {
               `${SCHOOL_SHORT_LABELS[key] || key} ${s.holding ? "持仓" : "空仓"}`,
               `school-mini-chip level-${s.level || "avoid"}`,
             );
-            chip.title = `${SCHOOL_LABELS[key] || key}：${s.holding ? "持仓中" : "空仓"}${s.switched_today ? " · 今日切换" : ""}${s.hint ? `\n${s.hint}` : ""}`;
+            chip.title = schoolSignalTooltip(key, s, s.holding, schoolJudgedAt, schoolBarDate);
             schoolCell.append(chip);
           }
           if (schoolStock.overall === "trigger" || schoolStock.overall === "near") {
@@ -6631,11 +7971,20 @@ function renderPositions() {
         } else {
           schoolCell.append(span("—", "muted"));
         }
+        // 判断时间单独一行小字：列宽有限，芯片换行后时间仍紧贴信号，不易读错归属。
+        if (schoolStock) {
+          const judged = formatSchoolJudgedAt(schoolJudgedAt);
+          if (judged) {
+            const timeLine = span(`判断 ${judged}`, "school-judged-at");
+            timeLine.title = `流派信号计算时刻：${formatDateTime(schoolJudgedAt) || schoolJudgedAt || "--"}\n依据日K：${schoolBarDate || "--"}\n信号以收盘价确认，盘中为预估。`;
+            schoolCell.append(timeLine);
+          }
+        }
         const dayPnlAmountCell = td(formatAmount(item.dayPnl, true), `numeric sensitive ${directionClass(item.dayPnl)}`);
         if (account.current !== true) dayPnlAmountCell.title = `按 ${account.date} 快照数量与当日价格变化估算`;
         row.append(
           stock,
-          renderPositionIntradayCell(item.symbol, positionIndex),
+          renderPositionIntradayCell(item.symbol),
           td(item.industry || "--", "muted"),
           td(formatPrice(item.price), `numeric ${directionClass(item.changePct)}`),
           td(formatPct(item.changePct), `numeric ${directionClass(item.changePct)}`),
@@ -6645,6 +7994,8 @@ function renderPositions() {
           td(isFiniteNumber(item.turnover) ? item.turnover.toFixed(2) : "--", "numeric"),
           td(isFiniteNumber(item.pe) ? (item.pe < 0 ? "亏" : item.pe.toFixed(1)) : "--", `numeric${isFiniteNumber(item.pe) && item.pe < 0 ? " is-negative-pe" : ""}`),
           td(isFiniteNumber(item.pb) ? item.pb.toFixed(2) : "--", "numeric"),
+          renderPositionNews(item),
+          renderPositionFundamental(item),
           positionWeightCell(item, totalMarketValue),
           marketValueCell,
           linesCell,
@@ -6660,7 +8011,7 @@ function renderPositions() {
         `${item.name ?? ""}（${item.symbol ?? ""}）行渲染失败：${error instanceof Error ? error.message : String(error)}`,
         "empty",
       );
-      fallbackCell.colSpan = 15;
+      fallbackCell.colSpan = 17;
       fallbackRow.append(fallbackCell);
       els.positionsBody.append(fallbackRow);
     }
@@ -7104,6 +8455,7 @@ function stockChartSymbolName(symbol) {
   return state.positions.find(bySymbol)?.name
     || state.markets.find(bySymbol)?.name
     || state.globals.find(bySymbol)?.name
+    || state.overnight.find(bySymbol)?.name
     || "";
 }
 
@@ -7131,6 +8483,7 @@ function showStockChart(anchor, pin = false) {
   els.stockChartTitle.textContent = `${display} · ${symbol}`;
   els.stockChartMeta.textContent = pin ? "已固定 · 正在获取行情…" : "悬停预览 · 正在获取行情…";
   renderStockChartLoading();
+  renderStockChartQuote(symbol);
   positionStockChartPopover();
 
   const cached = state.stockChartCache.get(symbol);
@@ -7147,7 +8500,7 @@ async function loadStockChart(symbol, token) {
   try {
     let pending = state.stockChartPending.get(symbol);
     if (!pending) {
-      pending = fetchJson(`/api/stock-chart?symbol=${encodeURIComponent(symbol)}&indicators=ma,macd,rsi,kdj,boll,atr,vol_ma`);
+      pending = fetchJson(`/api/stock-chart?symbol=${encodeURIComponent(symbol)}&indicators=ma,macd,rsi,kdj,boll,atr,vol_ma`, STOCK_CHART_REQUEST_TIMEOUT_MS);
       state.stockChartPending.set(symbol, pending);
     }
     let payload;
@@ -7195,8 +8548,47 @@ function scheduleStockChartClose() {
   cancelStockChartClose();
   state.stockChartCloseTimer = window.setTimeout(() => {
     state.stockChartCloseTimer = null;
-    if (!state.stockChartPinned) closeStockChart();
+    if (state.stockChartPinned) return;
+    // 指针自 pointerout 起一动没动 → 不是人离开了，是布局把触发器从指针底下
+    // 挪走了（首屏各面板异步加载、行情轮询重绘列表都会这样）。此时保持弹层，
+    // 等指针真的移动到别处，由 pointermove 的兜底逻辑关掉。
+    if (!pointerMovedSinceOut) return;
+    // 指针此刻仍停在某个触发器或弹层上：也不关。
+    if (pointerStillOnChartTrigger()) {
+      cancelStockChartClose();
+      return;
+    }
+    closeStockChart();
   }, STOCK_CHART_HOVER_CLOSE_MS);
+}
+
+// 指针是否仍停在某个图表触发器（或弹层本身）上。
+function pointerStillOnChartTrigger() {
+  if (!Number.isFinite(lastPointerPosition.x) || !Number.isFinite(lastPointerPosition.y)) {
+    return false;
+  }
+  const element = document.elementFromPoint(lastPointerPosition.x, lastPointerPosition.y);
+  if (element) {
+    if (els.stockChartPopover && els.stockChartPopover.contains(element)) return true;
+    if (element.closest(".stock-chart-trigger")) return true;
+  }
+  // 布局把触发器从指针底下挪走后，指针可能就停在它原来的位置附近。留一点
+  // 容差，别让人只是手抖一下就把悬浮预览关了。
+  const anchor = state.stockChartAnchor;
+  if (anchor?.isConnected) {
+    const rect = anchor.getBoundingClientRect();
+    const tolerance = 24;
+    const { x, y } = lastPointerPosition;
+    if (
+      x >= rect.left - tolerance
+      && x <= rect.right + tolerance
+      && y >= rect.top - tolerance
+      && y <= rect.bottom + tolerance
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function cancelStockChartClose() {
@@ -7213,27 +8605,44 @@ function positionStockChartPopover() {
   const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
   const margin = 8;
   const gap = 8;
-  // 首选显示在悬浮股票名称的右侧（垂直方向与该行对齐），这样不会遮挡
-  // 下方的其他股票行；右侧放不下时退到名称左侧，两者都放不下才回退为
-  // 行下方并做视口钳制。
-  let left = anchorRect.right + gap;
-  if (left + popoverRect.width > viewportWidth - margin) {
-    const leftSide = anchorRect.left - gap - popoverRect.width;
-    if (leftSide >= margin) {
-      left = leftSide;
-    } else {
-      left = Math.min(
-        Math.max(margin, anchorRect.left),
-        Math.max(margin, viewportWidth - popoverRect.width - margin),
-      );
-    }
-  }
-  const top = Math.max(
-    margin,
-    Math.min(anchorRect.top, viewportHeight - popoverRect.height - margin),
+  const clamp = (value, min, max) => Math.min(Math.max(min, value), Math.max(min, max));
+
+  // 候选位置：右侧 → 左侧 → 下方 → 上方。
+  // 弹层别盖住别的可悬浮标的（指数卡片、隔夜标的都排成一行，盖住的话人就没法
+  // 从一只滑到另一只），所以优先挑一个不遮挡其它触发器的位置。
+  const candidates = [
+    { left: anchorRect.right + gap, top: anchorRect.top },
+    { left: anchorRect.left - gap - popoverRect.width, top: anchorRect.top },
+    { left: anchorRect.left, top: anchorRect.bottom + gap },
+    { left: anchorRect.left, top: anchorRect.top - popoverRect.height - gap },
+  ].map((candidate) => ({
+    left: clamp(candidate.left, margin, viewportWidth - popoverRect.width - margin),
+    top: clamp(candidate.top, margin, viewportHeight - popoverRect.height - margin),
+  }));
+
+  const anchor = state.stockChartAnchor;
+  const others = [...document.querySelectorAll(".stock-chart-trigger")].filter(
+    (element) => element !== anchor,
   );
-  els.stockChartPopover.style.left = `${Math.round(left)}px`;
-  els.stockChartPopover.style.top = `${Math.round(top)}px`;
+  const coversOtherTrigger = (candidate) => {
+    const box = {
+      left: candidate.left,
+      top: candidate.top,
+      right: candidate.left + popoverRect.width,
+      bottom: candidate.top + popoverRect.height,
+    };
+    return others.some((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left < box.right
+        && rect.right > box.left
+        && rect.top < box.bottom
+        && rect.bottom > box.top;
+    });
+  };
+
+  const chosen = candidates.find((candidate) => !coversOtherTrigger(candidate)) || candidates[0];
+  els.stockChartPopover.style.left = `${Math.round(chosen.left)}px`;
+  els.stockChartPopover.style.top = `${Math.round(chosen.top)}px`;
 }
 
 function setStockChartExpanded(symbol) {
@@ -7260,6 +8669,35 @@ function renderStockChartLoading() {
     empty.hidden = false;
   }
   els.stockChartNote.textContent = "日K线使用前复权数据；分时图按接口返回的真实 5 分钟点绘制。";
+}
+
+// 悬浮弹层的"股票信息"行：价格/涨跌幅/报价时间取当前行情快照，相关度取
+// 隔夜相关度表（服务端重算优先，内置快照兜底）。这行不依赖图表接口，
+// 即使 K 线还在加载或加载失败也照常显示，方便判断"图是不是最新的"。
+function renderStockChartQuote(symbol) {
+  if (!els.stockChartQuote) return;
+  const normalized = normalizeChartSymbol(symbol);
+  const parts = [];
+  const row = [...state.overnight, ...state.globals].find(
+    (item) => normalizeChartSymbol(item.symbol) === normalized,
+  );
+  if (row && isFiniteNumber(row.price)) {
+    parts.push(span(formatPrice(row.price), "stock-chart-quote-price"));
+    parts.push(span(formatPct(row.changePct), directionClass(row.changePct)));
+    if (row.quoteTime) parts.push(span(`报价 ${formatDateTime(row.quoteTime)}`, "muted"));
+  }
+  const correlation = overnightCorrelationTable()[normalized];
+  if (correlation) {
+    const snapshotAsOf = state.overnightCorrelationAsOf;
+    parts.push(
+      span(
+        `${overnightCorrelationText(correlation)}${snapshotAsOf ? `（快照 ${snapshotAsOf}）` : ""}`,
+        "stock-chart-quote-correlation",
+      ),
+    );
+  }
+  els.stockChartQuote.replaceChildren(...parts);
+  els.stockChartQuote.hidden = parts.length === 0;
 }
 
 function renderStockChartFailure(message) {
@@ -7327,6 +8765,7 @@ function renderStockChart(chart) {
   els.stockChartTitle.textContent = `${chart.name || stockChartSymbolName(chart.symbol) || chart.symbol} · ${chart.symbol}`;
   const meta = [chart.source, chart.generatedAt ? formatDateTime(chart.generatedAt) : "", state.stockChartPinned ? "已固定" : "悬停预览"].filter(Boolean);
   els.stockChartMeta.textContent = meta.join(" · ") || "行情图";
+  renderStockChartQuote(chart.symbol);
 
   const period = selectStockChartPeriod(state.stockChartPeriod || "day");
   const fullKline = chart.kline.items;
@@ -7770,36 +9209,6 @@ function updatePositionSortIndicators() {
   }
 }
 
-function renderNews() {
-  const selected = state.selectedSymbol;
-  const filtered = selected === "all" ? state.news : state.news.filter((item) => item.symbols.includes(selected));
-  els.newsList.replaceChildren();
-  els.newsCount.textContent = `${filtered.length} 条`;
-
-  if (!filtered.length) {
-    const refreshing = Boolean(rootObject(state.newsPayload).refreshing);
-    const message = state.newsError
-      ? (state.news.length ? "该股票暂无匹配新闻；新闻源当前不可用" : "新闻源暂时不可用，稍后自动重试")
-      : (refreshing || !state.newsReceivedAt ? "正在获取相关新闻…" : "当前筛选下暂无重要新闻");
-    els.newsList.append(emptyNode(message));
-    return;
-  }
-
-  for (const item of filtered) {
-    const article = document.createElement("article");
-    article.className = "news-item";
-    const title = safeLink(item.url, item.title || "无标题新闻", "news-title");
-    const meta = div("news-item-meta");
-    const names = item.symbols.map(symbolName).filter(Boolean).slice(0, 3).join("、");
-    if (item.important) meta.append(span("重要", "tag important"));
-    if (names) meta.append(span(names));
-    if (item.source) meta.append(span(item.source));
-    if (item.publishedAt) meta.append(span(formatDateTime(item.publishedAt)));
-    article.append(title, meta);
-    els.newsList.append(article);
-  }
-}
-
 function renderConnectionState() {
   const payload = rootObject(state.quotePayload);
   const cache = asObject(payload.cache);
@@ -7841,9 +9250,7 @@ function renderConnectionState() {
 
 function renderSourceLabels() {
   const quoteSource = sourceDescription(state.quotePayload, "行情");
-  const newsSource = sourceDescription(state.newsPayload, "新闻");
   const quoteDegraded = isDegraded(state.quotePayload);
-  const newsDegraded = isDegraded(state.newsPayload);
   els.quoteSource.replaceChildren(span(`行情源 ${quoteSource}`));
   const quoteValidation = asObject(rootObject(state.quotePayload).quote_validation || rootObject(state.quotePayload).quoteValidation);
   if (quoteValidation.required_for_execution === true || quoteValidation.requiredForExecution === true) {
@@ -7851,8 +9258,6 @@ function renderSourceLabels() {
     els.quoteSource.append(" ", span(verified ? "双源已核" : "校验待核", verified ? "tag" : "tag degraded"));
   }
   if (quoteDegraded) els.quoteSource.append(" ", span("降级", "tag degraded"));
-  els.newsSource.replaceChildren(span(`新闻源 ${newsSource}`));
-  if (newsDegraded) els.newsSource.append(" ", span("降级", "tag degraded"));
 }
 
 // 主备线页脚摘要：汇总每条数据链路最近一次实际生效的层级（纯函数，可单测）。
@@ -8435,6 +9840,7 @@ function normalizeMarket(raw, fallbackName) {
     name,
     symbol,
     group: pick(item, ["group"]) || "",
+    featured: Boolean(pick(item, ["featured"])),
     price,
     changePct,
     turnover: firstNumber(pickNumber(item, ["turnover", "amount", "turnover_yi", "amount_yi"])),
@@ -8592,37 +9998,6 @@ function isDegraded(payload) {
     const source = asObject(value);
     return source.degraded === true || source.ok === false || /degraded|fallback|error|降级/i.test(String(source.status || ""));
   }));
-}
-
-function syncNewsFilter() {
-  const previous = state.selectedSymbol;
-  const filterKey = state.positions.map((holding) => `${holding.symbol}:${holding.name}`).join("|");
-  if (filterKey === state.newsFilterKey) return;
-  state.newsFilterKey = filterKey;
-  const fragment = document.createDocumentFragment();
-  const allOption = document.createElement("option");
-  allOption.value = "all";
-  allOption.textContent = "全部持仓";
-  fragment.append(allOption);
-  for (const holding of state.positions) {
-    const option = document.createElement("option");
-    option.value = holding.symbol;
-    option.textContent = holding.name;
-    fragment.append(option);
-  }
-  els.newsSymbolFilter.replaceChildren(fragment);
-  const stillExists = previous === "all" || state.positions.some((holding) => holding.symbol === previous);
-  state.selectedSymbol = stillExists ? previous : "all";
-  els.newsSymbolFilter.value = state.selectedSymbol;
-}
-
-function selectNewsSymbol(symbol) {
-  state.selectedSymbol = symbol;
-  els.newsSymbolFilter.value = symbol;
-  renderNews();
-  renderPositions();
-  const panelTop = document.querySelector(".news-panel")?.getBoundingClientRect().top ?? 0;
-  if (window.innerWidth < 1120 && panelTop > window.innerHeight) document.querySelector(".news-panel")?.scrollIntoView({ block: "start" });
 }
 
 function summaryItem(label, value, className) {
@@ -8868,7 +10243,8 @@ function formatMarketQuoteTimestamp(value) {
 
 function ageLabel(timestamp, baseAgeSeconds = 0) {
   if (!timestamp) return "--";
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000) + (baseAgeSeconds || 0));
+  const baseSeconds = Math.max(0, Math.floor(Number(baseAgeSeconds) || 0));
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000) + baseSeconds);
   if (seconds < 2) return "刚刚";
   if (seconds < 60) return `${seconds}秒前`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`;
@@ -9142,6 +10518,7 @@ if (typeof globalThis !== "undefined") {
     nearestDailyPnlHistoryPoint,
     personalIndexRecords,
     personalIndexChartOption,
+    personalIndexTooltipHtml,
     aggregatePersonalIndexRecords,
     aggregateStockOhlcByPeriod,
     projectIntradayPnlSeries,
@@ -9154,5 +10531,15 @@ if (typeof globalThis !== "undefined") {
     splitStockChartSeriesAtGaps,
     stockChartTimeValue,
     normalizeChartSymbol,
+    ageLabel,
+    buildIntradayHistoryCumulativeSegments,
+    marketTimezoneGroup,
+    marketTimezoneLabel,
+    timezoneDifferenceLabel,
+    beijingTimeDifferenceHours,
+    groupMarketsByTimezone,
+    overnightMarketsVisible,
+    filterGlobalsForOvernight,
+    normalizeBreakeven,
   });
 }

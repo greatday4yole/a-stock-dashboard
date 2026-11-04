@@ -387,7 +387,7 @@ def _verification_gate(
                 "message": "风险快照与当前 risk-policy.json 版本不一致",
             }
         )
-    explicit_portfolio = snapshot.get("portfolio_id")
+    explicit_portfolio = snapshot.get("portfolio_config_id") or snapshot.get("portfolio_id")
     if not explicit_portfolio or str(explicit_portfolio) != str(portfolio.get("portfolio_id")):
         reasons.append(
             {
