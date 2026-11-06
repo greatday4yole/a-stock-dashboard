@@ -3004,7 +3004,7 @@ function renderMarkets() {
       spark.dataset.symbol = symbol;
       spark.setAttribute("hidden", "");
       const cachedSpark = state.indexIntraday.cache.get(symbol);
-      if (cachedSpark) renderPositionIntradaySparkline(spark, cachedSpark.items, cachedSpark.prevClose);
+      if (cachedSpark) renderPositionIntradaySparkline(spark, cachedSpark.items, cachedSpark.prevClose, { showVolume: true });
       item.append(spark);
     }
     els.marketGrid.append(item);
@@ -3051,7 +3051,7 @@ function paintIndexSparklines(symbol) {
   document
     .querySelectorAll(`#market-grid .market-spark[data-symbol="${symbol}"]`)
     .forEach((svg) => {
-      if (!data || !renderPositionIntradaySparkline(svg, data.items, data.prevClose)) {
+      if (!data || !renderPositionIntradaySparkline(svg, data.items, data.prevClose, { showVolume: true })) {
         svg.setAttribute("hidden", "");
       }
     });
@@ -7367,16 +7367,22 @@ function setDecisionBadge(element, text, className) {
 const POSITION_INTRADAY_TTL_MS = 150_000;
 const POSITION_INTRADAY_SPARK_W = 80;
 const POSITION_INTRADAY_SPARK_H = 28;
+const MARKET_INTRADAY_SPARK_W = 120;
+const MARKET_INTRADAY_SPARK_H = 38;
 
-function renderPositionIntradaySparkline(svg, items, prevClose) {
+function renderPositionIntradaySparkline(svg, items, prevClose, options = {}) {
   svg.replaceChildren();
   if (!items || !items.length) {
     svg.setAttribute("hidden", "");
     return false;
   }
-  const w = POSITION_INTRADAY_SPARK_W;
-  const h = POSITION_INTRADAY_SPARK_H;
-  const pad = 2;
+  const showVolume = options.showVolume === true;
+  const w = showVolume ? MARKET_INTRADAY_SPARK_W : POSITION_INTRADAY_SPARK_W;
+  const h = showVolume ? MARKET_INTRADAY_SPARK_H : POSITION_INTRADAY_SPARK_H;
+  const pad = showVolume ? 3 : 2;
+  const volumeH = showVolume ? 9 : 0;
+  const volumeGap = showVolume ? 3 : 0;
+  const priceH = h - pad * 2 - volumeH - volumeGap;
   const allPrices = items.flatMap((item) => [item.low, item.high]);
   if (isFiniteNumber(prevClose) && prevClose > 0) allPrices.push(prevClose);
   const lo = Math.min(...allPrices);
@@ -7388,7 +7394,6 @@ function renderPositionIntradaySparkline(svg, items, prevClose) {
   const range = hi - lo || Math.max(Math.abs(hi) * 0.001, 0.01);
   const padded = { min: lo - range * 0.08, max: hi + range * 0.08 };
   const plotW = w - pad * 2;
-  const plotH = h - pad * 2;
 
   const projected = [];
   for (const item of items) {
@@ -7401,18 +7406,48 @@ function renderPositionIntradaySparkline(svg, items, prevClose) {
     return false;
   }
   const STOCK_INTRADAY_TOTAL_MINUTES_SPARK = 240;
-  const y = (val) => pad + (padded.max - val) / (padded.max - padded.min) * plotH;
+  const y = (val) => pad + (padded.max - val) / (padded.max - padded.min) * priceH;
   const x = (minute) => pad + minute / STOCK_INTRADAY_TOTAL_MINUTES_SPARK * plotW;
 
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg.setAttribute("width", w);
   svg.setAttribute("height", h);
+  svg.setAttribute("preserveAspectRatio", showVolume ? "none" : "xMidYMid meet");
 
   if (isFiniteNumber(prevClose) && prevClose >= padded.min && prevClose <= padded.max) {
     svg.append(svgNode("line", {
       x1: pad, x2: w - pad, y1: y(prevClose), y2: y(prevClose),
       class: "stock-chart-reference", "stroke-dasharray": "2 2",
     }));
+  }
+
+  // 主要市场卡片在价格线下方补一条分时成交量副图；持仓表的 80×28 迷你图
+  // 不显示成交量，避免挤占本来就有限的高度。
+  if (showVolume) {
+    const volumeTop = pad + priceH + volumeGap;
+    const volumes = projected.map((item) => (isFiniteNumber(item.volume) ? Math.max(item.volume, 0) : 0));
+    const maxVolume = Math.max(...volumes, 0);
+    if (maxVolume > 0) {
+      const slot = plotW / Math.max(projected.length, 48);
+      const barW = Math.max(1, Math.min(3.2, slot * 0.62));
+      projected.forEach((item, index) => {
+        const volume = volumes[index];
+        if (!(volume > 0)) return;
+        // 开盘首根 5 分钟量常是后续的十倍以上，线性高度会把其余量柱压成
+        // 一条虚线；用平方根缩放保留量能相对关系，同时让全天量形可读。
+        const barH = Math.max(0.8, Math.sqrt(volume / maxVolume) * volumeH);
+        const reference = index > 0 ? projected[index - 1].close : prevClose;
+        const barDirection = directionClass(item.close - (isFiniteNumber(reference) ? reference : item.close));
+        svg.append(svgNode("rect", {
+          x: x(item.plotMinute) - barW / 2,
+          y: volumeTop + (volumeH - barH),
+          width: barW,
+          height: barH,
+          rx: Math.min(0.6, barW / 2),
+          class: `stock-intraday-vol-bar ${barDirection}`,
+        }));
+      });
+    }
   }
 
   const latest = projected[projected.length - 1];
@@ -10494,6 +10529,7 @@ if (typeof globalThis !== "undefined") {
     normalizePnlSeries,
     normalizeStockChart,
     normalizeStockOhlcSeries,
+    renderPositionIntradaySparkline,
     normalizePortfolioDescriptor,
     buildCompareRows,
     buildCompareTrendSeries,

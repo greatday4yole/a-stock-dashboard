@@ -200,6 +200,13 @@ test("窗口放大时字体上限为五号", () => {
   assert.ok(widget.MAX_SCALE < 1.6);
 });
 
+test("双击组件在默认浏览器打开本机看板", () => {
+  assert.match(source, /addEventListener\("dblclick"/);
+  assert.match(source, /openDashboard\?\./);
+  assert.match(mainSource, /widget:open-dashboard/);
+  assert.match(mainSource, /shell\.openExternal\(activeOrigin\)/);
+});
+
 test("眼睛按钮切换金额显隐并记住选择", () => {
   assert.match(source, /AMOUNT_HIDDEN_KEY/);
   assert.match(source, /MASKED_AMOUNT/);

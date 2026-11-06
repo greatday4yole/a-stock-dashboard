@@ -768,6 +768,11 @@
     });
     shell.addEventListener("pointerup", endPointerDrag);
     shell.addEventListener("pointercancel", endPointerDrag);
+    shell.addEventListener("dblclick", (event) => {
+      if (event.target.closest(".no-drag, .resize-handle, select, input, button")) return;
+      event.preventDefault();
+      global.desktopWidget?.openDashboard?.()?.catch?.(() => {});
+    });
     global.addEventListener("blur", () => {
       if (dragPointerId === null) return;
       const pointerId = dragPointerId;
